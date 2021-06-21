@@ -29,7 +29,7 @@ CLIENT_SECRET = CLIENT['spotify']['secret']
 CLIENT_SIDE_URL = "http://127.0.0.1"
 PORT = 27150
 REDIRECT_URI = "{}:{}/spotify/callback/".format(CLIENT_SIDE_URL, PORT)
-SCOPE = "user-read-recently-played user-top-read"
+SCOPE = "user-read-recently-played user-top-read user-library-read"
 STATE = ""
 SHOW_DIALOG_bool = True
 SHOW_DIALOG_str = str(SHOW_DIALOG_bool).lower()
@@ -82,6 +82,8 @@ USER_PROFILE_ENDPOINT = "{}/{}".format(SPOTIFY_API_URL, 'me')
 USER_PLAYLISTS_ENDPOINT = "{}/{}".format(USER_PROFILE_ENDPOINT, 'playlists')
 USER_TOP_ARTISTS_AND_TRACKS_ENDPOINT = "{}/{}".format(
     USER_PROFILE_ENDPOINT, 'top')  # /<type>
+USER_TRACKS_ENDPOINT = "{}/{}".format(
+    USER_PROFILE_ENDPOINT, 'tracks')  # /<type>
 USER_RECENTLY_PLAYED_ENDPOINT = "{}/{}/{}".format(USER_PROFILE_ENDPOINT,
                                                   'player', 'recently-played')
 BROWSE_FEATURED_PLAYLISTS = "{}/{}/{}".format(SPOTIFY_API_URL, 'browse',
@@ -99,6 +101,19 @@ def get_users_top(auth_header, t, options = {}):
 
     if "limit" in options:
         url = f"{url}&limit={options['limit']}"
+
+    resp = requests.get(url, headers=auth_header)
+    return resp.json()
+
+def get_users_tracks(auth_header, options = {}):
+
+    url = f"{USER_TRACKS_ENDPOINT}"
+
+    if "limit" in options:
+        url = f"{url}?limit={options['limit']}"
+
+    if "offset" in options:
+        url = f"{url}&offset={options['offset']}"
 
     resp = requests.get(url, headers=auth_header)
     return resp.json()
