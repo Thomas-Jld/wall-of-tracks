@@ -19,6 +19,10 @@ const socket = io.connect(window.location.origin, {
 let last_played;
 let current_timestamp;
 
+socket.on("redirect", (url) => {
+    window.location.href = url;
+})
+
 socket.on("recent", (data) => {
     if(last_played == undefined || last_played != data[0].played_at) {
         last_played = data[0].played_at;

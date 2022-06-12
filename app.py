@@ -24,11 +24,6 @@ images = []
 albums = {}
 rows, columns = 6, 6
 
-code = None
-spotify_authorized = False
-auth_header = None
-requested = False
-
 app = Flask(__name__)
 app.config['SECRET_KEY'] = "AVeryUniquePasswordL1KeThis"
 CORS(app)
@@ -48,8 +43,9 @@ def spotify_login():
 
 @app.route("/walloftrack/spotify/callback/")
 def spotify_callback():
-    global code
     code = request.args["code"]
+    auth_header = spotify.authorize(code)
+    session["auth_header"] = auth_header
     return redirect("/walloftrack/recent_tracks/")
 
 @app.route("/walloftrack/recent_tracks/", methods=["GET"])
@@ -62,63 +58,33 @@ def static_path(path):
 
 @socketio.on('get_recent')
 def get_recent():
-    global spotify_authorized
-    global auth_header
-    global requested
-
-    if not spotify_authorized:
-        if not requested:
-            requested = True
-            auth_header = spotify.authorize(code)
-            spotify_authorized = True
-        else:
-            while not spotify_authorized:
-                time.sleep(0.001)
-
-    session["auth_header"] = auth_header
-    options = {"limit": 3}
-    recent = spotify.get_recently_played(auth_header, options)["items"]
-    socketio.emit('recent', recent)
+    client = request.sid
+    try:
+        options = {"limit": 3}
+        recent = spotify.get_recently_played(session["auth_header"], options)["items"]
+        socketio.emit('recent', recent, room=client)
+    except:
+        socketio.emit('redirect', "/walloftrack/spotify/", room=client)
 
 
 @socketio.on('get_all_recent')
 def get_all_recent():
-    global spotify_authorized
-    global auth_header
-    global requested
-
-    if not spotify_authorized:
-        if not requested:
-            requested = True
-            auth_header = spotify.authorize(code)
-            spotify_authorized = True
-        else:
-            while not spotify_authorized:
-                time.sleep(0.001)
-
-    session["auth_header"] = auth_header
-    options = {"limit": 50}
-    recent = spotify.get_recently_played(auth_header, options)["items"]
-    socketio.emit('init_recent', recent)
+    client = request.sid
+    try:
+        options = {"limit": 50}
+        recent = spotify.get_recently_played(session["auth_header"], options)["items"]
+        socketio.emit('init_recent', recent, room=client)
+    except:
+        socketio.emit('redirect', "/walloftrack/spotify/", room=client)
 
 @socketio.on('get_playing')
 def get_playing():
-    global spotify_authorized
-    global auth_header
-    global requested
-
-    if not spotify_authorized:
-        if not requested:
-            requested = True
-            auth_header = spotify.authorize(code)
-            spotify_authorized = True
-        else:
-            while not spotify_authorized:
-                time.sleep(0.001)
-
-    session["auth_header"] = auth_header
-    playing = spotify.get_currently_playing(auth_header)
-    socketio.emit('playing', playing)
+    client = request.sid
+    try:
+        playing = spotify.get_currently_playing(session["auth_header"])
+        socketio.emit('playing', playing, room=client)
+    except:
+        socketio.emit('redirect', "/walloftrack/spotify/", room=client)
 
 
 @app.route("/deezer/", methods=["GET"])
