@@ -16,7 +16,7 @@ const socket = io.connect(window.location.origin, {
     // transports: ["websocket"],
 });
 
-let last_played;
+let last_played = {};
 let current_timestamp;
 
 socket.on("redirect", (url) => {
@@ -24,16 +24,21 @@ socket.on("redirect", (url) => {
 });
 
 socket.on("recent", (data) => {
-    if (last_played == undefined || last_played != data[0].played_at) {
+    if ((last_played.played_at == undefined ||
+        last_played.played_at != data[0].played_at)) {
         let name, artist, album, image;
         name = data[0].track.name;
         artist = data[0].track.artists[0].name;
         album = data[0].track.album.name;
         image = data[0].track.album.images[0].url;
-        last_played = data[0].played_at;
-        loadImage(image, (img) => {
-            update_recently_played(img, name, artist, album);
-        });
+        last_played.played_at = data[0].played_at;
+        if(last_played.name != name || last_played.artist != artist) {
+            last_played.name = name;
+            last_played.artist = artist;
+            loadImage(image, (img) => {
+                update_recently_played(img, name, artist, album);
+            });
+        }
     }
 });
 
@@ -73,7 +78,9 @@ socket.on("init_recent", async (data) => {
         }
         img_loaded = false;
     }
-    last_played = data[0].played_at;
+    last_played.played_at = data[0].played_at;
+    last_played.name = data[0].track.name;
+    last_played.album_name = data[0].track.album.name;
 });
 
 setInterval(() => {
