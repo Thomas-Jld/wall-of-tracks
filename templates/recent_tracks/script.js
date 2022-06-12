@@ -137,3 +137,7 @@ function create_pattern(s_r) {
         [0, s_r, s_r],
     ];
 }
+
+function mousePressed() {
+    fullscreen(!fullscreen());
+}
