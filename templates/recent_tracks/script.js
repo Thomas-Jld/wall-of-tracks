@@ -7,7 +7,7 @@ let img_loaded = false;
 
 let pattern;
 let s_r;
-let pattern_no = 1;
+let pattern_no = 0;
 
 let multiplier = 1;
 let x_offset = 0,
