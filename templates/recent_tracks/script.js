@@ -85,7 +85,7 @@ function draw() {
             // stroke(255);
             // strokeWeight(1);
             fill(255);
-            textSize(pattern[0][2]/16 * multiplier);
+            textSize(pattern[0][2]/12 * multiplier);
             text(
                 currently_playing.name,
                 x_offset + pattern[0][0] + pattern[0][2] / 2,
@@ -126,7 +126,7 @@ function update_playing(image, name, artist, album) {
     };
 }
 
-function mousePressed() {
+function mouseClicked() {
     if (x_offset > 0 && mouseX < x_offset) {
         fullscreen(!fullscreen());
         windowResized();
