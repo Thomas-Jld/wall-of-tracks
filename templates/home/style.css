@@ -1,0 +1,38 @@
+html, body {
+    /* --color-primary: #292929; */
+    --color-background: #292929;
+    --color-primary: #fafafa;
+
+    width: 100vw;
+    /* height: 100vh; */
+
+    margin: 0;
+    padding: 0;
+
+    background-color: var(--color-background);
+    font-size: 24px;
+    font-family: 'Roboto', sans-serif;
+}
+
+#login-spotify {
+    width: fit-content;
+    margin: 25vh auto 3rem auto;
+}
+
+#login-deezer {
+    width: fit-content;
+    margin: 3rem auto 0 auto;
+}
+
+.login-button {
+    text-decoration: none;
+    color: var(--color-primary);
+    border: 2px solid var(--color-primary);
+    padding: 0.5rem 1rem;
+    border-radius: 5px;
+}
+
+.login-button:hover {
+    background-color: var(--color-primary);
+    color: var(--color-background);
+}

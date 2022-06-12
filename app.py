@@ -1,40 +1,40 @@
-import sys
-import os
 import json
-import time
+import os
+import requests
 
 from flask import (
     Flask,
-    request,
-    render_template,
     redirect,
-    session,
+    render_template,
+    request,
     send_from_directory,
+    session,
 )
-from flask_socketio import SocketIO
 from flask_cors import CORS
-
+from flask_socketio import SocketIO
 from PIL import Image
 
-import spotify_config as spotify
 import deezer_config as deezer
-
+import spotify_config as spotify
 
 images = []
 albums = {}
 rows, columns = 6, 6
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = "AVeryUniquePasswordL1KeThis"
+app.config["SECRET_KEY"] = "AVeryUniquePasswordL1KeThis"
 CORS(app)
-socketio = SocketIO(app, path='/walloftrack/socket.io')
-
+socketio = SocketIO(app, path="/walloftrack/socket.io")
 
 
 @app.route("/walloftrack/", methods=["GET"])
 def login():
-    return render_template("login.html")
+    return render_template("home/login.html")
 
+
+@app.route("/walloftrack/login/<path:path>")
+def login_static_path(path):
+    return send_from_directory("templates/home", path)
 
 @app.route("/walloftrack/spotify/", methods=["GET"])
 def spotify_login():
@@ -48,48 +48,52 @@ def spotify_callback():
     session["auth_header"] = auth_header
     return redirect("/walloftrack/recent_tracks/")
 
+
 @app.route("/walloftrack/recent_tracks/", methods=["GET"])
 def recent_tracks():
     return render_template("recent_tracks/index.html")
+
 
 @app.route("/walloftrack/recent_tracks/<path:path>")
 def static_path(path):
     return send_from_directory("templates/recent_tracks", path)
 
-@socketio.on('get_recent')
+
+@socketio.on("get_recent")
 def get_recent():
     client = request.sid
     try:
         options = {"limit": 3}
         recent = spotify.get_recently_played(session["auth_header"], options)["items"]
-        socketio.emit('recent', recent, room=client)
+        socketio.emit("recent", recent, room=client)
     except Exception as e:
         print(e)
-        socketio.emit('redirect', "/walloftrack/spotify/", room=client)
+        socketio.emit("redirect", "/walloftrack/spotify/", room=client)
 
 
-@socketio.on('get_all_recent')
+@socketio.on("get_all_recent")
 def get_all_recent():
     client = request.sid
     try:
         options = {"limit": 50}
         recent = spotify.get_recently_played(session["auth_header"], options)["items"]
-        socketio.emit('init_recent', recent, room=client)
+        socketio.emit("init_recent", recent, room=client)
     except Exception as e:
         print(e)
-        socketio.emit('redirect', "/walloftrack/spotify/", room=client)
+        socketio.emit("redirect", "/walloftrack/spotify/", room=client)
 
-@socketio.on('get_playing')
+
+@socketio.on("get_playing")
 def get_playing():
     client = request.sid
     try:
         playing = spotify.get_currently_playing(session["auth_header"])
-        socketio.emit('playing', playing, room=client)
+        socketio.emit("playing", playing, room=client)
     except ValueError:
         pass
     except Exception as e:
         print(e)
-        socketio.emit('redirect', "/walloftrack/spotify/", room=client)
+        socketio.emit("redirect", "/walloftrack/spotify/", room=client)
 
 
 @app.route("/deezer/", methods=["GET"])
@@ -168,7 +172,7 @@ def get_likes(code):
     albums = []
     banned = ["Lost Cause"]
 
-    with open("result.json", "w") as outfile:
+    with open("data/result.json", "w") as outfile:
         json.dump(tops, outfile)
 
     while len(albums) < rows * columns:
@@ -203,7 +207,7 @@ def generate_deezer_likes(likes):
     if len(tops) < rows * columns:
         return f"Not enough albums: {len(tops)}"
 
-    with open("result.json", "w") as outfile:
+    with open("data/result.json", "w") as outfile:
         json.dump(tops, outfile)
 
     while len(albums) < rows * columns:
