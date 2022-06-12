@@ -25,23 +25,44 @@ socket.on("redirect", (url) => {
 
 socket.on("recent", (data) => {
     if(last_played == undefined || last_played != data[0].played_at) {
+        let name, artist, album, image;
+        name = data[0].track.name;
+        artist = data[0].track.artists[0].name;
+        album = data[0].track.album.name;
+        image = data[0].track.album.images[0].url;
         last_played = data[0].played_at;
-        loadImage(data[0].track.album.images[0].url, update_recently_played)
+        loadImage(image, (img) => {
+            update_recently_played(img, name, artist, album);
+        })
     }
 });
 
 socket.on("playing", (data) => {
     if(current_timestamp == undefined || current_timestamp != data.timestamp) {
+        let name, artist, album, image;
+        name = data.item.name;
+        artist = data.item.artists[0].name;
+        album = data.item.album.name;
+        image = data.item.album.images[0].url;
         current_timestamp = data.timestamp;
-        loadImage(data.item.album.images[0].url, update_playing);
+        loadImage(image, (img) => {
+            update_playing(img, name, artist, album);
+        });
     }
     is_playing = data.is_playing;
 })
 
 socket.on("init_recent", async (data) => {
     let amount = min(data.length, 48);
+    let name, artist, album, image;
     for(let i = 0; i < amount; i++) {
-        loadImage(data[amount-i-1].track.album.images[0].url, update_recently_played);
+        name = data[amount-i-1].track.name;
+        artist = data[amount-i-1].track.artists[0].name;
+        album = data[amount-i-1].track.album.name;
+        image = data[amount-i-1].track.album.images[0].url;
+        loadImage(image, (img) => {
+            update_recently_played(img, name, artist, album);
+        });
         while(!img_loaded) {
             await sleep(100);
         }
