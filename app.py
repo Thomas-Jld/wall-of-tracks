@@ -63,7 +63,8 @@ def get_recent():
         options = {"limit": 3}
         recent = spotify.get_recently_played(session["auth_header"], options)["items"]
         socketio.emit('recent', recent, room=client)
-    except:
+    except Exception as e:
+        print(e)
         socketio.emit('redirect', "/walloftrack/spotify/", room=client)
 
 
@@ -74,7 +75,8 @@ def get_all_recent():
         options = {"limit": 50}
         recent = spotify.get_recently_played(session["auth_header"], options)["items"]
         socketio.emit('init_recent', recent, room=client)
-    except:
+    except Exception as e:
+        print(e)
         socketio.emit('redirect', "/walloftrack/spotify/", room=client)
 
 @socketio.on('get_playing')
@@ -83,7 +85,10 @@ def get_playing():
     try:
         playing = spotify.get_currently_playing(session["auth_header"])
         socketio.emit('playing', playing, room=client)
-    except:
+    except ValueError:
+        pass
+    except Exception as e:
+        print(e)
         socketio.emit('redirect', "/walloftrack/spotify/", room=client)
 
 
