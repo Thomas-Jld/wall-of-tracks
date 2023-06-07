@@ -25,13 +25,11 @@ CLIENT = json.load(open("conf.json", "r+"))
 CLIENT_ID = CLIENT["spotify"]["id"]
 CLIENT_SECRET = CLIENT["spotify"]["secret"]
 
-
-CLIENT_SIDE_URL = "http://127.0.0.1"
+CLIENT_SIDE_URL = "https://vps.thomasjuldo.com" # "http://127.0.0.1"
 PORT = 27150
-CLIENT_SIDE_ADRESS = f"{CLIENT_SIDE_URL}:{PORT}"
-# CLIENT_SIDE_ADRESS = "https://vps.thomasjuldo.com"
+CLIENT_SIDE_ADRESS = CLIENT_SIDE_URL # f"{CLIENT_SIDE_URL}:{PORT}"
 REDIRECT_URI = f"{CLIENT_SIDE_ADRESS}/walloftrack/spotify/callback/"
-SCOPE = "user-read-recently-played user-top-read user-library-read user-read-currently-playing"
+SCOPE = "user-read-recently-played user-read-currently-playing"
 STATE = ""
 SHOW_DIALOG_bool = True
 SHOW_DIALOG_str = str(SHOW_DIALOG_bool).lower()
