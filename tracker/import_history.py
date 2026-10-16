@@ -46,9 +46,13 @@ def main():
                 skipped["incognito"] += 1
                 continue
             track_id = uri.rsplit(":", 1)[-1]
-            # Placeholder until enrich.py fetches the real track; never overwrites API data.
+            # Placeholder until enrich.py fetches the real track. Never overwrites API data,
+            # except the blank names an earlier enrich.py copied from removed tracks' stubs.
             db.execute(
-                "INSERT OR IGNORE INTO tracks (id, name, artists, album_name) VALUES (?, ?, ?, ?)",
+                """INSERT INTO tracks (id, name, artists, album_name) VALUES (?, ?, ?, ?)
+                   ON CONFLICT(id) DO UPDATE SET name = excluded.name, artists = excluded.artists,
+                     album_name = excluded.album_name
+                   WHERE tracks.name = '' AND excluded.name != ''""",
                 (
                     track_id,
                     r["master_metadata_track_name"] or "",

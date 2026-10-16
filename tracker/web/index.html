@@ -6,8 +6,10 @@
   :root { --size: 86vmin; }
   html, body { margin: 0; height: 100%; background: #0c0c0f; overflow: hidden; }
   body.idle { cursor: none; }
-  #backdrop { position: fixed; inset: -10%; background-size: cover; background-position: center;
-              filter: blur(70px) brightness(.4) saturate(1.3); }
+  /* two layers so a new cover can cross-fade in */
+  .backdrop { position: fixed; inset: -10%; background-size: cover; background-position: center;
+              filter: blur(70px) brightness(.4) saturate(1.3); opacity: 0; transition: opacity 2.5s ease; }
+  .backdrop.on { opacity: 1; }
   .stage { position: fixed; inset: 0; display: grid; place-items: center; }
   .deck { position: relative; width: var(--size); height: var(--size); border-radius: 50%;
           box-shadow: 0 30px 80px rgba(0,0,0,.7), 0 8px 24px rgba(0,0,0,.5), 0 0 0 1px rgba(255,255,255,.08); }
@@ -25,8 +27,23 @@
       transparent 180deg, rgba(255,255,255,.2) 210deg, transparent 242deg);
     -webkit-mask: radial-gradient(circle, transparent 18%, #000 19%, #000 98.4%, transparent 98.6%);
             mask: radial-gradient(circle, transparent 18%, #000 19%, #000 98.4%, transparent 98.6%); }
+  /* hidden menu: hovering (or tapping) the top-right corner reveals it */
+  #corner { position: fixed; top: 0; right: 0; width: 110px; height: 110px; z-index: 1; }
+  #menu { position: fixed; top: calc(16px + env(safe-area-inset-top, 0px)); right: 16px; z-index: 2; min-width: 160px;
+          display: flex; flex-direction: column; gap: 1px; padding: 6px; border-radius: 12px;
+          background: rgba(10,10,14,.6); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+          box-shadow: 0 10px 30px rgba(0,0,0,.4), 0 0 0 1px rgba(255,255,255,.07);
+          font: 13px system-ui, sans-serif; opacity: 0; visibility: hidden; transform: translateY(-4px);
+          transition: opacity .25s .5s, transform .25s .5s, visibility 0s .75s; }
+  #corner:hover + #menu, #menu:hover, #menu:focus-within, #menu.open {
+          opacity: 1; visibility: visible; transform: none; transition-delay: 0s; }
+  #menu .head { color: rgba(255,255,255,.4); font-size: 11px; letter-spacing: .08em; text-transform: uppercase; padding: 8px 10px 3px; }
+  #menu a { color: #e6e6e6; text-decoration: none; padding: 7px 10px; border-radius: 7px; }
+  #menu a:hover, #menu a:focus-visible { background: rgba(255,255,255,.12); outline: none; }
+  #menu a[aria-current] { color: #fff; font-weight: 600; }
+  body.idle #menu:not(:hover):not(:focus-within):not(.open) { cursor: none; }
 </style>
-<div id="backdrop"></div>
+<div class="backdrop"></div><div class="backdrop"></div>
 <div class="stage">
   <div class="deck" id="deck" role="img" aria-label="The last 24 hours of listening, as a vinyl record">
     <canvas id="disc"></canvas>
@@ -34,6 +51,16 @@
     <div class="sheen"></div>
   </div>
 </div>
+<div id="corner" aria-hidden="true"></div>
+<nav id="menu" aria-label="Wall of Tracks">
+  <a href="/" aria-current="page">Now playing</a>
+  <span class="head">Past listening</span>
+  <a href="/past/#Eras">Eras</a>
+  <a href="/past/#Groove">Groove</a>
+  <a href="/past/#Records">Records</a>
+  <a href="/past/#Spiral">Top 10 · Spiral</a>
+  <a href="/past/#Sleeve">Top 10 · Sleeve</a>
+</nav>
 <script>
 const DAY_MS = 24 * 3600e3;
 const RPM = 2.5;               // slow on purpose: it's a wall piece, not a turntable
@@ -118,6 +145,23 @@ function image(url) {
   return img.complete && img.naturalWidth ? img : null;
 }
 
+// ---------- background: follows the label, cross-fading once the new cover has loaded ----------
+const backdrops = [...document.querySelectorAll(".backdrop")];
+let backdropUrl, front = 0;
+function setBackdrop(url) {
+  if (url === backdropUrl) return;
+  backdropUrl = url;
+  const show = () => {
+    if (backdropUrl !== url) return;  // superseded while loading
+    front ^= 1;
+    backdrops[front].style.backgroundImage = url ? `url("${url}")` : "none";
+    backdrops[front].classList.add("on");
+    backdrops[front ^ 1].classList.remove("on");
+  };
+  if (!url) return show();
+  const im = new Image(); im.onload = im.onerror = show; im.src = url;
+}
+
 // ---------- drawing ----------
 let redrawQueued = false;
 function redraw() {
@@ -191,9 +235,7 @@ function drawDisc() {
   ctx.restore();
   ctx.fillStyle = "#0c0c0f"; ctx.beginPath(); ctx.arc(R, R, R * 0.022, 0, 7); ctx.fill();
 
-  const bg = top ? `url("${top.img}")` : "none";
-  const backdrop = document.getElementById("backdrop");
-  if (backdrop.style.backgroundImage !== bg) backdrop.style.backgroundImage = bg;
+  setBackdrop(playing ? nowPlaying.track?.album_image : top?.img);
 
   const tr = nowPlaying?.track;
   deck.setAttribute("aria-label", `The last 24 hours of listening as a vinyl record: ${plays.length} tracks.` +
@@ -216,7 +258,15 @@ function fit() {
   redraw();
 }
 addEventListener("resize", fit);
-addEventListener("click", () => document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen?.());
+// touch screens have no hover: tapping the corner opens the menu, the next tap elsewhere closes it,
+// and only a tap with the menu closed toggles fullscreen
+const menu = document.getElementById("menu");
+document.getElementById("corner").addEventListener("click", e => { e.stopPropagation(); menu.classList.add("open"); });
+menu.addEventListener("click", e => e.stopPropagation());
+addEventListener("click", () => {
+  if (menu.classList.contains("open")) { menu.classList.remove("open"); return; }
+  document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen?.();
+});
 let idleTimer;
 addEventListener("pointermove", () => {
   document.body.classList.remove("idle");

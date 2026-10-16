@@ -1,0 +1,10 @@
+[Unit]
+Description=Wall of Tracks - rebuild listening stats for /past/
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/home/ubuntu/Projects/wall-of-tracks/tracker
+ExecStart=/home/ubuntu/Projects/wall-of-tracks/tracker/.venv/bin/python stats.py
+Environment=PYTHONUNBUFFERED=1
+Environment=WOT_PUBLIC_DIR=/var/www/walloftrack/data

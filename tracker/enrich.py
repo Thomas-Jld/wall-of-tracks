@@ -27,9 +27,10 @@ def main():
     for start in range(0, len(ids), BATCH):
         batch = ids[start:start + BATCH]
         for track_id, track in zip(batch, sp.tracks(batch)["tracks"]):
-            if track:
+            # removed tracks come back as None or as a blank stub; keep the export's names for those
+            if track and track.get("name"):
                 upsert_track(db, track, track_id=track_id)
-            else:  # removed from Spotify; mark so it isn't retried every run
+            else:  # mark so it isn't retried every run
                 db.execute("UPDATE tracks SET fetched_at = ? WHERE id = ?", (utcnow(), track_id))
                 missing += 1
         db.commit()

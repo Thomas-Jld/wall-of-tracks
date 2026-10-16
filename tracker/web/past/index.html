@@ -1,0 +1,403 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Wall of Tracks · Past</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #0c0c0f; overflow: hidden; font: 13px system-ui, sans-serif; color: #ddd; }
+  body.idle { cursor: none; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+  nav { position: fixed; left: 50%; bottom: calc(14px + env(safe-area-inset-bottom, 0px)); transform: translateX(-50%);
+        display: flex; gap: 4px; align-items: center; background: rgba(0,0,0,.6); padding: 5px; border-radius: 10px;
+        backdrop-filter: blur(8px); white-space: nowrap; transition: opacity .6s; }
+  body.idle nav { opacity: 0; pointer-events: none; }
+  nav a { color: #aaa; text-decoration: none; padding: 6px 10px; border-radius: 6px; }
+  nav a:hover, nav button:hover { color: #fff; }
+  nav button { background: none; border: 0; color: #aaa; padding: 6px 10px; border-radius: 6px; cursor: pointer; font: inherit; }
+  nav button.on { background: #fff; color: #000; }
+  nav .sep { width: 1px; height: 18px; background: #444; margin: 0 4px; }
+  nav select { background: #222; color: #ddd; border: 0; border-radius: 6px; padding: 5px; font: inherit; }
+  #tip { position: fixed; pointer-events: none; background: rgba(0,0,0,.85); padding: 6px 9px; border-radius: 6px; line-height: 1.4; max-width: 280px; }
+  #tip b { color: #fff; }
+</style>
+<canvas id="c" role="img" aria-label="Past listening"></canvas>
+<nav id="nav"></nav>
+<div id="tip" hidden></div>
+<script>
+const canvas = document.getElementById("c"), tip = document.getElementById("tip");
+let ctx = canvas.getContext("2d");  // swapped temporarily while rendering into offscreen canvases
+const BG = "#0c0c0f", H_MS = 3.6e6, TAU = 2 * Math.PI;
+const motion = !matchMedia("(prefers-reduced-motion: reduce)").matches;
+let STATS = null, albums = [], byKey = {}, hits = [], period = "all";
+
+// ---------- covers ----------
+// Spotify serves each cover at 64, 300 and 640px under different URL prefixes
+const VARIANTS = [[64, "ab67616d00004851"], [300, "ab67616d00001e02"], [640, "ab67616d0000b273"]];
+const VARIANT_RE = /ab67616d0000(?:4851|1e02|b273)/;
+const images = new Map();
+let imagesVersion = 0, versionTimer = null;
+function image(url) {
+  if (!images.has(url)) {
+    const im = new Image();
+    im.onload = () => {  // batch arrivals, then let cached renders pick the new covers up
+      if (!versionTimer) versionTimer = setTimeout(() => { versionTimer = null; imagesVersion++; renders.clear(); requestDraw(); }, 250);
+    };
+    im.src = url; images.set(url, im);
+  }
+  const im = images.get(url); return im.complete && im.naturalWidth ? im : null;
+}
+const variantFor = px => (VARIANTS.find(([s]) => s >= px * (devicePixelRatio || 1)) || VARIANTS[2])[1];
+function bestImage(url, px) {
+  const want = image(url.replace(VARIANT_RE, variantFor(px)));
+  if (want) return want;
+  for (const [, pre] of VARIANTS) {  // while the right size loads, use any size already here
+    const im = images.get(url.replace(VARIANT_RE, pre)); if (im?.complete && im.naturalWidth) return im;
+  }
+  return null;
+}
+// zoom >= 1 and pan in [-1, 1] give a slow Ken Burns drift
+function drawFit(g, im, x, y, w, h, zoom = 1, px = 0, py = 0) {
+  const iw = im.naturalWidth, ih = im.naturalHeight, k = Math.max(w / iw, h / ih) * zoom, sw = w / k, sh = h / k;
+  g.drawImage(im, (iw - sw) / 2 * (1 + px), (ih - sh) / 2 * (1 + py), sw, sh, x, y, w, h);
+}
+function coverFit(url, x, y, w, h, zoom, px, py) {
+  const im = bestImage(url, Math.max(w, h));
+  if (im) drawFit(ctx, im, x, y, w, h, zoom, px, py); else { ctx.fillStyle = "#1b1b20"; ctx.fillRect(x, y, w, h); }
+}
+const sprites = new Map();
+function sprite(url, r) {  // a round cover, pre-cut so moving discs cost one drawImage each
+  const px = Math.max(2, Math.round(2 * r * (devicePixelRatio || 1))), key = url + "|" + px;
+  if (sprites.has(key)) return sprites.get(key);
+  const im = bestImage(url, 2 * r); if (!im) return null;
+  const c = document.createElement("canvas"); c.width = c.height = px;
+  const g = c.getContext("2d"), lw = Math.max(1, px * 0.04);
+  g.beginPath(); g.arc(px / 2, px / 2, px / 2, 0, TAU); g.clip(); drawFit(g, im, 0, 0, px, px);
+  g.strokeStyle = "rgba(0,0,0,.55)"; g.lineWidth = lw; g.beginPath(); g.arc(px / 2, px / 2, px / 2 - lw / 2, 0, TAU); g.stroke();
+  if (im.src.includes(variantFor(2 * r))) sprites.set(key, c);  // don't keep a blurry stand-in
+  return c;
+}
+function disc(url, x, y, r) {
+  const s = sprite(url, r);
+  if (s) ctx.drawImage(s, x - r, y - r, 2 * r, 2 * r);
+  else { ctx.fillStyle = "#1b1b20"; ctx.beginPath(); ctx.arc(x, y, r, 0, TAU); ctx.fill(); }
+}
+function slicedCover(url, cx, cy, rm, am, size) {  // a cover with its top pointing outward along am
+  const im = bestImage(url, size); if (!im) return;
+  ctx.save(); ctx.translate(cx, cy); ctx.rotate(am + Math.PI / 2);
+  ctx.drawImage(im, -size / 2, -rm - size / 2, size, size); ctx.restore();
+}
+
+// ---------- small things ----------
+function vivid([r, g, b]) {  // a cover colour lifted so it reads on the dark ground
+  r /= 255; g /= 255; b /= 255;
+  const mx = Math.max(r, g, b), mn = Math.min(r, g, b), l = (mx + mn) / 2, d = mx - mn;
+  if (!d) return `hsl(0 0% ${Math.max(55, l * 100)}%)`;
+  const s = d / (1 - Math.abs(2 * l - 1)), h = mx === r ? ((g - b) / d + 6) % 6 : mx === g ? (b - r) / d + 2 : (r - g) / d + 4;
+  return `hsl(${h * 60} ${Math.min(85, s * 100)}% ${Math.max(55, l * 100)}%)`;
+}
+const hours = ms => ms >= 2 * H_MS ? `${Math.round(ms / H_MS)} h` : `${Math.round(ms / 60000)} min`;
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const albumTip = (a, extra = "") => `<b>${esc(a.name)}</b><br>${esc(a.artist)}<br>${hours(a.ms)}${extra}`;
+function label(text, x, y, { size = 12, color = "rgba(255,255,255,.45)", align = "left", weight = 400 } = {}) {
+  ctx.font = `${weight} ${size}px system-ui, sans-serif`; ctx.fillStyle = color; ctx.textAlign = align; ctx.textBaseline = "middle";
+  ctx.fillText(text, x, y);
+}
+const rand = i => { const x = Math.sin(i * 12.9898 + 78.233) * 43758.5453; return x - Math.floor(x); };  // stable per index
+function drift(n, t) {  // a slow wander, different for every disc
+  if (!motion) return [0, 0];
+  const amp = Math.min(4, 1 + n.r * 0.06);
+  return [Math.sin(t * n.f1 + n.p1) * amp, Math.cos(t * n.f2 + n.p2) * amp];
+}
+function withMotionParams(nodes) {
+  nodes.forEach((n, i) => { n.f1 = TAU / (12 + 14 * rand(i)); n.f2 = TAU / (14 + 12 * rand(i + 500)); n.p1 = TAU * rand(i + 900); n.p2 = TAU * rand(i + 1300); });
+  return nodes;
+}
+function sweepBand(x, y0, y1, width, alpha) {
+  const g = ctx.createLinearGradient(x - width, 0, x + width, 0);
+  g.addColorStop(0, "rgba(255,255,255,0)"); g.addColorStop(0.5, `rgba(255,255,255,${alpha})`); g.addColorStop(1, "rgba(255,255,255,0)");
+  ctx.fillStyle = g; ctx.fillRect(x - width, y0, 2 * width, y1 - y0);
+}
+
+// ---------- caches: layouts depend on size and period; renders also on which covers have arrived ----------
+const layouts = new Map(), renders = new Map();
+const layoutFor = (name, W, H, build) => { const k = `${name}|${W}|${H}|${period}`; if (!layouts.has(k)) layouts.set(k, build()); return layouts.get(k); };
+const renderFor = (key, build) => { if (!renders.has(key)) renders.set(key, build()); return renders.get(key); };
+function offscreen(w, h, paint) {
+  const dpr = devicePixelRatio || 1, c = document.createElement("canvas");
+  c.width = Math.ceil(w * dpr); c.height = Math.ceil(h * dpr);
+  const g = c.getContext("2d"); g.scale(dpr, dpr);
+  const saved = ctx; ctx = g; try { paint(); } finally { ctx = saved; }
+  return c;
+}
+
+// ---------- Eras: albums at their listening-weighted date, sized by hours ----------
+const eraList = () => albums.slice(0, 240);
+function yearTicks(t0, t1, X, y) {
+  for (let yr = new Date(t0).getUTCFullYear() + 1; Date.UTC(yr, 0, 1) < t1; yr++) {
+    const x = X(Date.UTC(yr, 0, 1));
+    ctx.fillStyle = "rgba(255,255,255,.12)"; ctx.fillRect(x, y, 1, 10);
+    label(String(yr), x + 4, y + 20, { size: 11, color: "rgba(255,255,255,.35)" });
+  }
+}
+function viewEras(W, H, t) {
+  const L = layoutFor("eras", W, H, () => {
+    const list = eraList(), left = 50, right = 50, top = 40, bottom = 110;
+    const ts = list.map(a => Date.parse(a.tmean)), t0 = Math.min(...ts) - 120 * 864e5, t1 = Math.max(...ts) + 120 * 864e5;
+    const X = tm => left + (tm - t0) / (t1 - t0) * (W - left - right);
+    const cy = top + (H - top - bottom) / 2, maxMs = list[0].ms;
+    let maxR = (H - top - bottom) * 0.09, placed;
+    for (let attempt = 0; attempt < 8; attempt++) {  // shrink until the swarm fits vertically
+      placed = []; let fits = true;
+      for (const a of list) {
+        const r = Math.max(5, maxR * Math.sqrt(a.ms / maxMs)), x = X(Date.parse(a.tmean));
+        let y = cy;
+        for (let k = 0; k < 2000; k++) {
+          y = cy + (k % 2 ? 1 : -1) * Math.ceil(k / 2) * 2;
+          if (!placed.some(p => Math.hypot(p.x - x, p.y - y) < p.r + r + 1.5)) break;
+        }
+        if (y - r < top || y + r > H - bottom) fits = false;
+        placed.push({ a, x, y, r });
+      }
+      if (fits) break;
+      maxR *= 0.85;
+    }
+    return { t0, t1, X, left, right, top, bottom, nodes: withMotionParams(placed) };
+  });
+  // a soft light travels through the years; the albums it passes swell a little
+  const sx = motion ? L.left + ((t / 50) % 1) * (W - L.left - L.right) : -1e9;
+  if (motion) sweepBand(sx, L.top - 20, H - L.bottom, 160, 0.045);
+  const drawn = L.nodes.map(n => {
+    const [dx, dy] = drift(n, t);
+    return { n, x: n.x + dx, y: n.y + dy, r: n.r * (1 + 0.2 * Math.exp(-(((n.x - sx) / 60) ** 2))) };
+  }).sort((p, q) => p.r - q.r);  // big and swelling discs on top
+  for (const d of drawn) disc(d.n.a.img, d.x, d.y, d.r);
+  for (const d of drawn) hits.push({ cx: d.x, cy: d.y, r: d.r, tip: albumTip(d.n.a, `<br>centred on ${d.n.a.tmean.slice(0, 7)}`) });
+  yearTicks(L.t0, L.t1, L.X, H - L.bottom + 6);
+}
+
+// ---------- Groove: the same albums along a spiral, time running outward, slowly turning ----------
+function relax(nodes, iters, pull) {  // push overlapping discs apart, pull each back toward its target
+  for (let it = 0; it < iters; it++) {
+    for (let i = 0; i < nodes.length; i++) for (let j = i + 1; j < nodes.length; j++) {
+      const p = nodes[i], q = nodes[j], dx = q.x - p.x, dy = q.y - p.y, d = Math.hypot(dx, dy) || 0.01, min = p.r + q.r + 1;
+      if (d < min) { const k = (min - d) / d, wp = q.r / (p.r + q.r), wq = 1 - wp; p.x -= dx * k * wp; p.y -= dy * k * wp; q.x += dx * k * wq; q.y += dy * k * wq; }
+    }
+    for (const n of nodes) { n.x += (n.tx - n.x) * pull; n.y += (n.ty - n.y) * pull; }
+  }
+}
+function viewGroove(W, H, t) {
+  const S = Math.min(W, H - 50), cx = W / 2, cy = (H - 50) / 2;
+  const L = layoutFor("groove", W, H, () => {
+    const list = eraList(), R = S * 0.47, r0 = R * 0.12, turns = 3.5, TH = turns * TAU;
+    const ts = list.map(a => Date.parse(a.tmean)), t0 = Math.min(...ts) - 60 * 864e5, t1 = Math.max(...ts) + 60 * 864e5;
+    const thOf = tm => (tm - t0) / (t1 - t0) * TH, rOf = th => r0 + (R - r0) * th / TH;
+    const at = th => [rOf(th) * Math.cos(th - Math.PI / 2), rOf(th) * Math.sin(th - Math.PI / 2)];
+    const spacing = (R - r0) / turns, maxMs = list[0].ms;
+    const nodes = list.map(a => { const [x, y] = at(thOf(Date.parse(a.tmean))); return { a, tx: x, ty: y, x, y, r: Math.max(3.5, spacing * 0.42 * Math.sqrt(a.ms / maxMs)) }; });
+    relax(nodes, 120, 0.06);
+    const years = [];
+    for (let yr = new Date(t0).getUTCFullYear() + 1; Date.UTC(yr, 0, 1) < t1; yr++) {
+      const th = thOf(Date.UTC(yr, 0, 1)), r = rOf(th) + spacing * 0.5;
+      years.push({ yr, dot: at(th), text: [r * Math.cos(th - Math.PI / 2), r * Math.sin(th - Math.PI / 2)] });
+    }
+    return { nodes, years, at, TH };
+  });
+  const art = renderFor(`groove|${W}|${H}|${imagesVersion}`, () => offscreen(S, S, () => {
+    ctx.translate(S / 2, S / 2);
+    ctx.strokeStyle = "rgba(255,255,255,.08)"; ctx.lineWidth = 1; ctx.beginPath();
+    for (let th = 0; th <= L.TH; th += 0.02) { const [x, y] = L.at(th); th ? ctx.lineTo(x, y) : ctx.moveTo(x, y); }
+    ctx.stroke();
+    for (const y of L.years) {
+      ctx.fillStyle = "rgba(255,255,255,.35)"; ctx.beginPath(); ctx.arc(...y.dot, 2, 0, TAU); ctx.fill();
+      label(String(y.yr), ...y.text, { size: 10, color: "rgba(255,255,255,.3)", align: "center" });
+    }
+    for (const n of [...L.nodes].sort((p, q) => p.r - q.r)) disc(n.a.img, n.x, n.y, n.r);
+  }));
+  const angle = motion ? t * TAU / 120 : 0;  // one turn every two minutes
+  ctx.save(); ctx.translate(cx, cy); ctx.rotate(angle); ctx.drawImage(art, -S / 2, -S / 2, S, S); ctx.restore();
+  const c = Math.cos(angle), s = Math.sin(angle);
+  for (const n of L.nodes) hits.push({ cx: cx + n.x * c - n.y * s, cy: cy + n.x * s + n.y * c, r: n.r, tip: albumTip(n.a, `<br>centred on ${n.a.tmean.slice(0, 7)}`) });
+}
+
+// ---------- Records: one picture-disc per year, all slowly turning ----------
+const recordYears = () => Object.keys(STATS.year_tops).filter(y => (STATS.year_totals[y] || 0) > 5 * H_MS).sort();
+function vinylArt(R, slices, labelUrl) {  // drawn at (R, R); the reflection is added live, on top
+  const rArt = R * 0.97, rWax = R * 0.31, rLabel = R * 0.3, total = slices.reduce((s, x) => s + x.ms, 0);
+  ctx.fillStyle = "#0a0a0c"; ctx.beginPath(); ctx.arc(R, R, R, 0, TAU); ctx.fill();
+  let acc = 0;
+  for (const s of slices) {
+    const a0 = -Math.PI / 2 + TAU * acc / total, a1 = a0 + TAU * s.ms / total, am = (a0 + a1) / 2; acc += s.ms;
+    ctx.save(); ctx.beginPath(); ctx.arc(R, R, rArt, a0, a1); ctx.arc(R, R, rWax, a1, a0, true); ctx.closePath(); ctx.clip();
+    const rm = (rArt + rWax) / 2; slicedCover(s.img, R, R, rm, am, Math.max(rArt - rWax, rm * (a1 - a0)) * 1.12);
+    ctx.restore();
+    ctx.strokeStyle = "rgba(6,6,8,.85)"; ctx.lineWidth = Math.max(0.6, R * 0.004);
+    ctx.beginPath(); ctx.moveTo(R + rWax * Math.cos(a0), R + rWax * Math.sin(a0)); ctx.lineTo(R + rArt * Math.cos(a0), R + rArt * Math.sin(a0)); ctx.stroke();
+  }
+  ctx.strokeStyle = "rgba(0,0,0,.16)"; ctx.lineWidth = 0.7;  // grooves
+  for (let r = rWax + 2; r < R; r += Math.max(2, R / 70)) { ctx.beginPath(); ctx.arc(R, R, r, 0, TAU); ctx.stroke(); }
+  ctx.save(); ctx.beginPath(); ctx.arc(R, R, rLabel, 0, TAU); ctx.clip(); coverFit(labelUrl, R - rLabel, R - rLabel, 2 * rLabel, 2 * rLabel); ctx.restore();
+  ctx.fillStyle = BG; ctx.beginPath(); ctx.arc(R, R, R * 0.025, 0, TAU); ctx.fill();
+}
+function sheen(cx, cy, R) {
+  if (!ctx.createConicGradient) return;
+  const g = ctx.createConicGradient(0, cx, cy);
+  g.addColorStop(0, "rgba(255,255,255,0)"); g.addColorStop(0.08, "rgba(255,255,255,.14)"); g.addColorStop(0.17, "rgba(255,255,255,0)");
+  g.addColorStop(0.5, "rgba(255,255,255,0)"); g.addColorStop(0.58, "rgba(255,255,255,.11)"); g.addColorStop(0.67, "rgba(255,255,255,0)");
+  ctx.fillStyle = g; ctx.beginPath(); ctx.arc(cx, cy, R, 0, TAU); ctx.arc(cx, cy, R * 0.3, 0, TAU, true); ctx.fill();
+}
+function viewRecords(W, H, t) {
+  const L = layoutFor("records", W, H, () => {
+    const years = recordYears(), n = years.length, avail = H - 70;
+    let cols = 1; for (let c = 1; c <= n; c++) if (Math.min(W / c, avail / Math.ceil(n / c)) >= Math.min(W / cols, avail / Math.ceil(n / cols))) cols = c;
+    const rows = Math.ceil(n / cols), cell = Math.min(W / cols, avail / rows), R = cell * 0.4;
+    const ox = (W - cols * cell) / 2, oy = (avail - rows * cell) / 2;
+    return { R, cell, records: years.map((y, i) => ({
+      y, i, total: STATS.year_totals[y], tops: STATS.year_tops[y].map(k => byKey[k]).filter(Boolean),
+      cx: ox + (i % cols + 0.5) * cell, cy: oy + (Math.floor(i / cols) + 0.5) * cell - cell * 0.04,
+    })) };
+  });
+  for (const rec of L.records) {
+    const art = renderFor(`record|${rec.y}|${W}|${H}|${imagesVersion}`, () => offscreen(2 * L.R, 2 * L.R,
+      () => vinylArt(L.R, rec.tops.map(a => ({ img: a.img, ms: a.years[rec.y] })), rec.tops[0].img)));
+    const angle = motion ? t * TAU / 60 + rec.i * 0.9 : 0;
+    ctx.save(); ctx.translate(rec.cx, rec.cy); ctx.rotate(angle); ctx.drawImage(art, -L.R, -L.R, 2 * L.R, 2 * L.R); ctx.restore();
+    sheen(rec.cx, rec.cy, L.R);
+    label(`${rec.y}  ·  ${Math.round(rec.total / H_MS)} h`, rec.cx, rec.cy + L.R + L.cell * 0.06, { align: "center", size: 12 });
+    hits.push({ cx: rec.cx, cy: rec.cy, r: L.R, tip: `<b>${rec.y}</b> · ${Math.round(rec.total / H_MS)} h<br>album of the year: ${esc(rec.tops[0].name)} — ${esc(rec.tops[0].artist)} (${hours(rec.tops[0].years[rec.y])})` });
+  }
+}
+
+// ---------- top 10 ----------
+function top10() {
+  if (period === "all") return albums.slice(0, 10).map(a => ({ a, ms: a.ms }));
+  return STATS.year_tops[period].map(k => byKey[k]).filter(Boolean).slice(0, 10).map(a => ({ a, ms: a.years[period] }));
+}
+const periodName = () => period === "all" ? "all time" : period;
+const kenBurns = (t, i) => motion ? [1.07 + 0.05 * Math.sin(t * TAU / 40 + i * 1.7), 0.6 * Math.sin(t * TAU / 55 + i), 0.6 * Math.cos(t * TAU / 47 + i * 2.1)] : [1, 0, 0];
+
+// ---------- Spiral: golden-ratio tiling, #1 largest ----------
+function viewSpiral(W, H, t) {
+  const fib = [55, 34, 21, 13, 8, 5, 3, 2, 1, 1], s = Math.min((W - 80) / 89, (H - 110) / 55);
+  const ox = (W - 89 * s) / 2, oy = (H - 50 - 55 * s) / 2;
+  let rect = { x: 0, y: 0, w: 89, h: 55 };
+  top10().forEach(({ a, ms }, i) => {
+    const n = fib[i], dir = i % 4; let sq;
+    if (dir === 0) { sq = [rect.x, rect.y]; rect = { x: rect.x + n, y: rect.y, w: rect.w - n, h: rect.h }; }
+    if (dir === 1) { sq = [rect.x, rect.y]; rect = { x: rect.x, y: rect.y + n, w: rect.w, h: rect.h - n }; }
+    if (dir === 2) { sq = [rect.x + rect.w - n, rect.y]; rect = { x: rect.x, y: rect.y, w: rect.w - n, h: rect.h }; }
+    if (dir === 3) { sq = [rect.x, rect.y + rect.h - n]; rect = { x: rect.x, y: rect.y, w: rect.w, h: rect.h - n }; }
+    const x = ox + sq[0] * s + 2, y = oy + sq[1] * s + 2, w = n * s - 4;
+    coverFit(a.img, x, y, w, w, ...kenBurns(t, i));
+    if (n >= 13) {
+      const g = ctx.createLinearGradient(0, y + w * 0.6, 0, y + w);
+      g.addColorStop(0, "rgba(0,0,0,0)"); g.addColorStop(1, "rgba(0,0,0,.75)");
+      ctx.fillStyle = g; ctx.fillRect(x, y + w * 0.6, w, w * 0.4);
+      const fs = Math.max(11, w * 0.045);
+      label(a.name.length > 38 ? a.name.slice(0, 36) + "…" : a.name, x + fs, y + w - fs * 2.9, { size: fs, color: "#fff", weight: 600 });
+      label(`${a.artist} · ${hours(ms)}`, x + fs, y + w - fs * 1.5, { size: fs * 0.85, color: "rgba(255,255,255,.75)" });
+    }
+    hits.push({ x, y, w, h: w, tip: `#${i + 1} · ${periodName()}<br>` + albumTip({ ...a, ms }) });
+  });
+}
+
+// ---------- Sleeve: the back of a record sleeve ----------
+function viewSleeve(W, H, t) {
+  const items = top10(), m = Math.min(W, H) * 0.06, big = Math.min(H - 50 - 2 * m, W * 0.4);
+  const bx = m, by = (H - 50 - big) / 2;
+  coverFit(items[0].a.img, bx, by, big, big, ...kenBurns(t, 0));
+  hits.push({ x: bx, y: by, w: big, h: big, tip: albumTip({ ...items[0].a, ms: items[0].ms }) });
+  const lx = bx + big + m, lw = W - lx - m, rowH = big / 10.6;
+  label(`TOP 10 · ${periodName().toUpperCase()}`, lx, by + rowH * 0.25, { size: Math.max(11, rowH * 0.22), color: "rgba(255,255,255,.4)", weight: 600 });
+  const allYears = Object.keys(STATS.year_totals).sort();
+  items.forEach(({ a, ms }, i) => {
+    const y = by + rowH * (i + 0.6), c = rowH * 0.78;
+    label(String(i + 1).padStart(2, "0"), lx, y + c / 2, { size: rowH * 0.32, color: "rgba(255,255,255,.35)", weight: 300 });
+    const cxp = lx + rowH * 0.75; coverFit(a.img, cxp, y, c, c);
+    const tx = cxp + c + rowH * 0.3, fs = Math.max(11, rowH * 0.24);
+    label(a.name.length > 60 ? a.name.slice(0, 58) + "…" : a.name, tx, y + c * 0.25, { size: fs, color: "#f2f2f2", weight: 600 });
+    label(a.artist, tx, y + c * 0.62, { size: fs * 0.85, color: "rgba(255,255,255,.55)" });
+    label(hours(ms), lx + lw, y + c * 0.25, { size: fs, color: "#f2f2f2", align: "right" });
+    // small bars: listening per year (all time) or per hour of day (one year)
+    const series = period === "all" ? allYears.map(yr => a.years[yr] || 0) : a.hours;
+    const sw = Math.min(lw * 0.22, 180), sx = lx + lw - sw, bw = sw / series.length, smax = Math.max(...series);
+    ctx.fillStyle = a.color ? vivid(a.color) : "#aaa";
+    series.forEach((v, k) => { const bh = c * 0.4 * v / smax; ctx.fillRect(sx + k * bw, y + c - bh, Math.max(1, bw - 1), bh); });
+    hits.push({ x: lx, y, w: lw, h: c, tip: `#${i + 1}<br>` + albumTip({ ...a, ms }) + `<br><small>bars: ${period === "all" ? "listening per year" : "listening per hour of day"}</small>` });
+  });
+}
+
+// ---------- shell ----------
+const views = { Eras: viewEras, Groove: viewGroove, Records: viewRecords, "|": null, Spiral: viewSpiral, Sleeve: viewSleeve };
+const periodViews = new Set(["Spiral", "Sleeve"]);
+const fromHash = () => { const h = decodeURIComponent(location.hash.slice(1)); return views[h] ? h : "Eras"; };
+let current = fromHash();
+const nav = document.getElementById("nav"), sel = document.createElement("select");
+nav.insertAdjacentHTML("beforeend", `<a href="/" title="Back to the live record">Now</a><span class="sep"></span>`);
+for (const name of Object.keys(views)) {
+  if (!views[name]) { const s = document.createElement("span"); s.className = "sep"; nav.append(s); continue; }
+  const b = document.createElement("button"); b.textContent = name;
+  b.onclick = () => { location.hash = name; };
+  nav.append(b);
+}
+sel.onchange = () => { period = sel.value; requestDraw(); };
+nav.append(sel);
+addEventListener("hashchange", () => { current = fromHash(); tip.hidden = true; requestDraw(); });
+
+let mouse = null;
+function draw(t) {
+  const dpr = devicePixelRatio || 1, W = innerWidth, H = innerHeight;
+  if (canvas.width !== Math.round(W * dpr) || canvas.height !== Math.round(H * dpr)) {
+    canvas.width = Math.round(W * dpr); canvas.height = Math.round(H * dpr); layouts.clear(); renders.clear();
+  }
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.fillStyle = BG; ctx.fillRect(0, 0, W, H);
+  hits = [];
+  if (STATS && W > 200 && H > 200) views[current](W, H, t);
+  nav.querySelectorAll("button").forEach(b => b.classList.toggle("on", b.textContent === current));
+  sel.hidden = !periodViews.has(current);
+  if (mouse) showTip();
+}
+function hitTest(x, y) {
+  for (let i = hits.length - 1; i >= 0; i--) {
+    const h = hits[i];
+    if (h.w != null && x >= h.x && x < h.x + h.w && y >= h.y && y < h.y + h.h) return h;
+    if (h.r != null && Math.hypot(x - h.cx, y - h.cy) <= h.r) return h;
+  }
+}
+function showTip() {
+  const h = hitTest(mouse.x, mouse.y);
+  tip.hidden = !h; if (!h) return;
+  tip.innerHTML = h.tip;
+  tip.style.left = Math.min(mouse.x + 14, innerWidth - tip.offsetWidth - 8) + "px";
+  tip.style.top = Math.min(mouse.y + 14, innerHeight - tip.offsetHeight - 8) + "px";
+}
+canvas.addEventListener("mousemove", e => { mouse = { x: e.clientX, y: e.clientY }; showTip(); });
+canvas.addEventListener("mouseleave", () => { mouse = null; tip.hidden = true; });
+
+// on a wall: the menu and cursor fade out when nobody is touching anything
+let idleTimer;
+function wake() { document.body.classList.remove("idle"); clearTimeout(idleTimer); idleTimer = setTimeout(() => document.body.classList.add("idle"), 4000); }
+addEventListener("pointermove", wake); addEventListener("pointerdown", wake); addEventListener("keydown", wake);
+wake();
+
+async function loadStats() {
+  try {
+    const r = await fetch("/data/stats.json", { cache: "no-cache" });
+    if (!r.ok) throw new Error(r.status);
+    STATS = await r.json();
+  } catch (e) { console.warn("stats unavailable", e); return; }
+  albums = STATS.albums;
+  byKey = Object.fromEntries(albums.map(a => [a.key, a]));
+  const years = recordYears().reverse();
+  if (period !== "all" && !years.includes(period)) period = "all";
+  sel.innerHTML = `<option value="all">All time</option>` + years.map(y => `<option>${y}</option>`).join("");
+  sel.value = period;
+  layouts.clear(); renders.clear(); requestDraw();
+}
+
+let queued = false;
+function requestDraw() { if (!motion && !queued) { queued = true; requestAnimationFrame(now => { queued = false; draw(now / 1000); }); } }
+function frame(now) { draw(now / 1000); requestAnimationFrame(frame); }
+addEventListener("resize", requestDraw);
+loadStats();
+setInterval(loadStats, 3600e3);  // the stats are rebuilt daily
+motion ? requestAnimationFrame(frame) : requestDraw();
+</script>
