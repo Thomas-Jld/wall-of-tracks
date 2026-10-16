@@ -5,6 +5,7 @@
 <style>
   :root { --size: 86vmin; }
   html, body { margin: 0; height: 100%; background: #0c0c0f; overflow: hidden; }
+  body { touch-action: manipulation; }  /* a double tap switches style instead of zooming */
   body.idle { cursor: none; }
   /* two layers so a new cover can cross-fade in */
   .backdrop { position: fixed; inset: -10%; background-size: cover; background-position: center;
@@ -47,6 +48,7 @@
 <div class="stage">
   <div class="deck" id="deck" role="img" aria-label="The last 24 hours of listening, as a vinyl record">
     <canvas id="disc"></canvas>
+    <canvas id="flow" hidden></canvas>
     <div class="grooves"></div>
     <div class="sheen"></div>
   </div>
@@ -137,6 +139,7 @@ function image(url) {
   if (!url) return null;
   if (!images.has(url)) {
     const img = new Image();
+    img.crossOrigin = "anonymous";  // so the flow layer may use the drawn record as a texture
     img.onload = () => redraw();
     img.src = url;
     images.set(url, img);
@@ -162,6 +165,23 @@ function setBackdrop(url) {
   const im = new Image(); im.onload = im.onerror = show; im.src = url;
 }
 
+// ---------- style: Organic + flow by default, Classic on a double click; remembered per browser ----------
+const SHAPES = {
+  classic: { off: () => 0, ring: () => 0 },
+  // every slice edge waves outward; the waves' rhythm, phase and strength drift smoothly around the disc,
+  // smooth enough that neighbouring edges stay near-parallel and thin slices never tear
+  organic: {
+    off: (d, a) => {
+      const n = (k1, p1, k2, p2) => 0.5 + 0.3 * Math.sin(k1 * a + p1) + 0.2 * Math.sin(k2 * a + p2);  // periodic, 0..1
+      const freq = 2.0 + 1.6 * n(1, 0.3, 3, 2.1), phase = 2 * Math.PI * n(2, 1.7, 1, 4.2), amp = 0.03 + 0.033 * n(3, 0.9, 2, 5.5);
+      return amp * (Math.sin(d * Math.PI * freq + phase) + 0.35 * Math.sin(d * Math.PI * 5.3 + 2 * phase)) * Math.min(1, d * 4);
+    },
+    ring: a => 0.0033 * (Math.sin(a * 13 + 1) + 0.6 * Math.sin(a * 29 + 2) + 0.4 * Math.sin(a * 7 + 0.5)),
+  },
+};
+let style = "flow";  // "flow" (organic + flow) | "classic"
+try { style = localStorage.getItem("wot-style") || "flow"; } catch {}
+
 // ---------- drawing ----------
 let redrawQueued = false;
 function redraw() {
@@ -171,49 +191,58 @@ function redraw() {
 }
 
 function drawDisc() {
-  const px = Math.round(canvas.clientWidth * (devicePixelRatio || 1));
+  const px = Math.round(deck.clientWidth * (devicePixelRatio || 1));
   if (px < 50) return;
   if (canvas.width !== px) canvas.width = canvas.height = px;
   const ctx = canvas.getContext("2d"), R = px / 2;
-  const rOut = R * 0.985, rArt = R * 0.97, rWax = R * 0.31, rLabel = R * 0.3;
-  const groove = Math.max(1, R * 0.006);
+  const rOut = R * 0.985, rArt = R * 0.97, rWax = R * 0.31, rLabel = R * 0.3, span = rArt - rWax;
+  const groove = Math.max(1, R * 0.006), shape = style === "classic" ? SHAPES.classic : SHAPES.organic;
   ctx.clearRect(0, 0, px, px);
   ctx.fillStyle = "#0a0a0c"; ctx.beginPath(); ctx.arc(R, R, rOut, 0, 7); ctx.fill();
 
   const plays = composedPlays(), rs = runs(plays), total = rs.reduce((a, r) => a + r.sec, 0);
   let acc = 0;
   for (const run of rs) {
-    const a0 = -Math.PI / 2 + 2 * Math.PI * acc / total, a1 = a0 + 2 * Math.PI * run.sec / total, am = (a0 + a1) / 2;
+    const a0 = -Math.PI / 2 + 2 * Math.PI * acc / total, a1 = a0 + 2 * Math.PI * run.sec / total;
     acc += run.sec;
-    ctx.save();
-    ctx.beginPath(); ctx.arc(R, R, rArt, a0, a1); ctx.arc(R, R, rWax, a1, a0, true); ctx.closePath(); ctx.clip();
+    // positions inside a slice: u across it (0..1), d from its inner edge to its outer edge (0..1)
+    const angle = (u, d) => { const base = a0 + u * (a1 - a0); return base + shape.off(d, base); };
+    const at = (u, d, extra = 0) => { const a = angle(u, d), r = rWax + span * d + extra; return [R + r * Math.cos(a), R + r * Math.sin(a)]; };
+    const ringAt = (u, d) => at(u, d, R * shape.ring(angle(u, d)));
+    const nU = Math.max(8, Math.ceil((a1 - a0) * 60)), nD = 40;
+
+    ctx.save(); ctx.beginPath();
+    for (let i = 0; i <= nU; i++) ctx.lineTo(...at(i / nU, 0));
+    for (let i = 0; i <= nD; i++) ctx.lineTo(...at(1, i / nD));
+    for (let i = nU; i >= 0; i--) ctx.lineTo(...at(i / nU, 1));
+    for (let i = nD; i >= 0; i--) ctx.lineTo(...at(0, i / nD));
+    ctx.closePath(); ctx.clip();
     // cover printed with its top facing outward, centred on the slice
-    const rm = (rArt + rWax) / 2, s = Math.max(rArt - rWax, rm * (a1 - a0)) * 1.12, im = image(run.img);
-    ctx.translate(R, R); ctx.rotate(am + Math.PI / 2);
-    if (im) ctx.drawImage(im, -s / 2, -rm - s / 2, s, s);
-    ctx.restore();
+    const am = angle(0.5, 0.5), rm = rWax + span / 2, s = Math.max(span, rm * (a1 - a0)) * 1.15, im = image(run.img);
+    if (im) { ctx.save(); ctx.translate(R, R); ctx.rotate(am + Math.PI / 2); ctx.drawImage(im, -s / 2, -rm - s / 2, s, s); ctx.restore(); }
 
     // one concentric band per track, first track on the outside like a real record;
     // alternate bands are tinted and separated by a smooth gap with a lit edge
     let f = 0;
     run.tracks.forEach((t, k) => {
-      const rA = rArt - f * (rArt - rWax);
-      f += t.sec / run.sec;
-      const rB = rArt - f * (rArt - rWax);
+      const dA = 1 - f; f += t.sec / run.sec; const dB = 1 - f;
       if (k % 2) {
-        ctx.fillStyle = "rgba(0,0,0,.18)";
-        ctx.beginPath(); ctx.arc(R, R, rA, a0, a1); ctx.arc(R, R, rB, a1, a0, true); ctx.closePath(); ctx.fill();
+        ctx.beginPath();
+        for (let i = 0; i <= nU; i++) ctx.lineTo(...ringAt(i / nU, dA));
+        for (let i = nU; i >= 0; i--) ctx.lineTo(...ringAt(i / nU, dB));
+        ctx.closePath(); ctx.fillStyle = "rgba(0,0,0,.18)"; ctx.fill();
       }
       if (k < run.tracks.length - 1) {
-        ctx.lineWidth = groove * 1.8; ctx.strokeStyle = "rgba(6,6,8,.9)";
-        ctx.beginPath(); ctx.arc(R, R, rB, a0, a1); ctx.stroke();
-        ctx.lineWidth = groove * 0.35; ctx.strokeStyle = "rgba(255,255,255,.28)";
-        ctx.beginPath(); ctx.arc(R, R, rB - groove * 1.1, a0, a1); ctx.stroke();
+        for (const [w, c, dd] of [[groove * 1.8, "rgba(6,6,8,.9)", 0], [groove * 0.35, "rgba(255,255,255,.28)", -groove * 1.1 / span]]) {
+          ctx.beginPath(); for (let i = 0; i <= nU; i++) ctx.lineTo(...ringAt(i / nU, dB + dd));
+          ctx.lineWidth = w; ctx.strokeStyle = c; ctx.stroke();
+        }
       }
     });
+    ctx.restore();
     if (rs.length > 1) {
-      ctx.strokeStyle = "rgba(6,6,8,.85)"; ctx.lineWidth = groove * 0.6;
-      ctx.beginPath(); ctx.moveTo(R + rWax * Math.cos(a0), R + rWax * Math.sin(a0)); ctx.lineTo(R + rArt * Math.cos(a0), R + rArt * Math.sin(a0)); ctx.stroke();
+      ctx.beginPath(); for (let i = 0; i <= nD; i++) ctx.lineTo(...at(0, i / nD));
+      ctx.strokeStyle = "rgba(6,6,8,.85)"; ctx.lineWidth = groove * 0.6; ctx.stroke();
     }
   }
 
@@ -235,6 +264,7 @@ function drawDisc() {
   ctx.restore();
   ctx.fillStyle = "#0c0c0f"; ctx.beginPath(); ctx.arc(R, R, R * 0.022, 0, 7); ctx.fill();
 
+  if (style === "flow") uploadFlow();
   setBackdrop(playing ? nowPlaying.track?.album_image : top?.img);
 
   const tr = nowPlaying?.track;
@@ -242,13 +272,78 @@ function drawDisc() {
     (playing && tr ? ` Now playing ${tr.name} by ${tr.artists.join(", ")}.` : ""));
 }
 
+// ---------- flow: the drawn record, slowly marbled on the GPU ----------
+const flowCanvas = document.getElementById("flow");
+let gl = null, uTime = null, flowBroken = false;
+function setupFlow() {
+  gl = flowCanvas.getContext("webgl");
+  if (!gl) return false;
+  const shader = (type, src) => { const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s); return s; };
+  const prog = gl.createProgram();
+  gl.attachShader(prog, shader(gl.VERTEX_SHADER, "attribute vec2 p; varying vec2 v; void main() { v = p * .5 + .5; gl_Position = vec4(p, 0, 1); }"));
+  gl.attachShader(prog, shader(gl.FRAGMENT_SHADER, `
+    precision highp float;
+    varying vec2 v; uniform sampler2D tex; uniform float t;
+    float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+    float noise(vec2 p) { vec2 i = floor(p), f = fract(p), u = f * f * (3. - 2. * f);
+      return mix(mix(hash(i), hash(i + vec2(1, 0)), u.x), mix(hash(i + vec2(0, 1)), hash(i + vec2(1, 1)), u.x), u.y); }
+    float fbm(vec2 p) { float s = 0., a = .5; for (int k = 0; k < 4; k++) { s += a * noise(p); p *= 2.03; a *= .5; } return s; }
+    void main() {
+      vec2 p = v * 2. - 1.;
+      float r = length(p), a = atan(p.y, p.x);
+      if (r > 1.) { gl_FragColor = vec4(0.); return; }
+      float w = smoothstep(.31, .42, r) * (1. - smoothstep(.93, .975, r));  // the label and the rim stay still
+      vec2 q = p * 2. + vec2(t * .02, -t * .015);
+      a += w * .14 * (fbm(q) - .5);
+      r += w * .012 * (fbm(q * 1.3 + 7.) - .5);
+      gl_FragColor = texture2D(tex, vec2(cos(a), sin(a)) * r * .5 + .5);
+    }`));
+  gl.linkProgram(prog);
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) { gl = null; return false; }
+  gl.useProgram(prog);
+  gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
+  const loc = gl.getAttribLocation(prog, "p"); gl.enableVertexAttribArray(loc); gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+  gl.bindTexture(gl.TEXTURE_2D, gl.createTexture());
+  for (const [k, v] of [[gl.TEXTURE_MIN_FILTER, gl.LINEAR], [gl.TEXTURE_MAG_FILTER, gl.LINEAR], [gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE], [gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE]])
+    gl.texParameteri(gl.TEXTURE_2D, k, v);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+  uTime = gl.getUniformLocation(prog, "t");
+  return true;
+}
+function uploadFlow() {
+  if (!gl || flowBroken) return;
+  try {
+    if (flowCanvas.width !== canvas.width) { flowCanvas.width = flowCanvas.height = canvas.width; gl.viewport(0, 0, canvas.width, canvas.height); }
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, canvas);
+  } catch (e) {  // a cover served without CORS taints the canvas: stay on the plain organic record
+    console.warn("flow unavailable", e); flowBroken = true; applyStyle();
+  }
+}
+const flowing = () => style === "flow" && gl && !flowBroken;
+function applyStyle() {
+  if (style === "flow" && !gl && !flowBroken && !setupFlow()) flowBroken = true;
+  flowCanvas.hidden = !flowing(); canvas.hidden = flowing();
+  redraw();
+}
+function toggleStyle() {
+  style = style === "classic" ? "flow" : "classic";
+  try { localStorage.setItem("wot-style", style); } catch {}
+  applyStyle();
+}
+
 // ---------- spin: ease up when playing, coast down when paused, like a turntable ----------
-let angle = 0, speed = 0, last = performance.now();
+// the flow moves with the spin, so the record settles completely when the music stops
+let angle = 0, speed = 0, flowTime = 0, last = performance.now();
 function frame(now) {
   const dt = Math.min(0.1, (now - last) / 1000); last = now;
-  const playing = isPlaying(), target = playing && !reduceMotion ? RPM * 6 : 0;
+  const playing = isPlaying(), full = RPM * 6, target = playing && !reduceMotion ? full : 0;
   speed += (target - speed) * (1 - Math.exp(-dt / (playing ? 0.9 : 2.2)));
-  if (speed > 0.001) { angle = (angle + speed * dt) % 360; canvas.style.transform = `rotate(${angle}deg)`; }
+  if (speed > 0.001) {
+    angle = (angle + speed * dt) % 360; flowTime += dt * speed / full;
+    canvas.style.transform = flowCanvas.style.transform = `rotate(${angle}deg)`;
+  }
+  if (flowing()) { gl.uniform1f(uTime, flowTime); gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4); }
   requestAnimationFrame(frame);
 }
 
@@ -263,9 +358,16 @@ addEventListener("resize", fit);
 const menu = document.getElementById("menu");
 document.getElementById("corner").addEventListener("click", e => { e.stopPropagation(); menu.classList.add("open"); });
 menu.addEventListener("click", e => e.stopPropagation());
+// one tap toggles fullscreen, a double tap switches between the organic and classic record;
+// a single tap waits a moment so a double tap doesn't also flip fullscreen twice
+let tapTimer = null;
 addEventListener("click", () => {
   if (menu.classList.contains("open")) { menu.classList.remove("open"); return; }
-  document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen?.();
+  if (tapTimer) { clearTimeout(tapTimer); tapTimer = null; toggleStyle(); return; }
+  tapTimer = setTimeout(() => {
+    tapTimer = null;
+    document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen?.();
+  }, 280);
 });
 let idleTimer;
 addEventListener("pointermove", () => {
@@ -274,6 +376,7 @@ addEventListener("pointermove", () => {
 });
 
 fit();
+applyStyle();
 connect();
 setInterval(() => { if (isPlaying()) redraw(); }, 2000);  // the live slice keeps growing
 requestAnimationFrame(frame);
