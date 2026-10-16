@@ -1,0 +1,16 @@
+[Unit]
+Description=Wall of Tracks - Spotify listening tracker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=ubuntu
+WorkingDirectory=/home/ubuntu/Projects/wall-of-tracks/tracker
+ExecStart=/home/ubuntu/Projects/wall-of-tracks/tracker/.venv/bin/python tracker.py
+Environment=PYTHONUNBUFFERED=1
+Environment=WOT_PUBLIC_DIR=/var/www/walloftrack/data
+Restart=always
+RestartSec=60
+
+[Install]
+WantedBy=multi-user.target

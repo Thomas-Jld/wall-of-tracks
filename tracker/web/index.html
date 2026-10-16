@@ -1,0 +1,230 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Wall of Tracks</title>
+<style>
+  :root { --size: 86vmin; }
+  html, body { margin: 0; height: 100%; background: #0c0c0f; overflow: hidden; }
+  body.idle { cursor: none; }
+  #backdrop { position: fixed; inset: -10%; background-size: cover; background-position: center;
+              filter: blur(70px) brightness(.4) saturate(1.3); }
+  .stage { position: fixed; inset: 0; display: grid; place-items: center; }
+  .deck { position: relative; width: var(--size); height: var(--size); border-radius: 50%;
+          box-shadow: 0 30px 80px rgba(0,0,0,.7), 0 8px 24px rgba(0,0,0,.5), 0 0 0 1px rgba(255,255,255,.08); }
+  .deck > * { position: absolute; inset: 0; border-radius: 50%; }
+  canvas { width: 100%; height: 100%; will-change: transform; }
+  /* fine grooves, symmetric so they can sit on a static layer above the spinning art */
+  .grooves { pointer-events: none;
+    background: repeating-radial-gradient(circle at center, rgba(0,0,0,.22) 0 1px, rgba(255,255,255,.03) 1px 2px, transparent 2px 4px);
+    -webkit-mask: radial-gradient(circle, transparent 30.5%, #000 31%, #000 98.4%, transparent 98.6%);
+            mask: radial-gradient(circle, transparent 30.5%, #000 31%, #000 98.4%, transparent 98.6%); }
+  /* light reflection: stays put while the record turns underneath */
+  .sheen { pointer-events: none; mix-blend-mode: screen;
+    background: conic-gradient(from 0deg,
+      transparent 0deg, rgba(255,255,255,.26) 30deg, transparent 62deg,
+      transparent 180deg, rgba(255,255,255,.2) 210deg, transparent 242deg);
+    -webkit-mask: radial-gradient(circle, transparent 18%, #000 19%, #000 98.4%, transparent 98.6%);
+            mask: radial-gradient(circle, transparent 18%, #000 19%, #000 98.4%, transparent 98.6%); }
+</style>
+<div id="backdrop"></div>
+<div class="stage">
+  <div class="deck" id="deck" role="img" aria-label="The last 24 hours of listening, as a vinyl record">
+    <canvas id="disc"></canvas>
+    <div class="grooves"></div>
+    <div class="sheen"></div>
+  </div>
+</div>
+<script>
+const DAY_MS = 24 * 3600e3;
+const RPM = 2.5;               // slow on purpose: it's a wall piece, not a turntable
+const STALE_MS = 60e3;         // the tracker reports at least every 10s; silence longer than this means it's down
+const canvas = document.getElementById("disc"), deck = document.getElementById("deck");
+const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+// nowAt is when *this browser* received the player state, so a skewed clock doesn't matter
+let dayPlays = [], nowPlaying = null, nowAt = 0;
+
+// ---------- data: pushed live, with plain polling as a fallback ----------
+function setDay(d) {
+  dayPlays = d.plays.map(p => ({ ...p, t0: Date.parse(p.t0), t1: Date.parse(p.t1) }));
+  redraw();
+}
+function setNow(n) { nowPlaying = n; nowAt = Date.now(); redraw(); }
+
+async function poll() {
+  try {
+    const get = url => fetch(url, { cache: "no-cache" }).then(r => r.ok ? r.json() : Promise.reject(r.status));
+    const [d, n] = await Promise.all([get("data/day.json"), get("data/now_playing.json")]);
+    setDay(d); setNow(n);
+  } catch (e) { console.warn("poll failed", e); }
+}
+
+let fallback = null;
+function connect() {
+  const es = new EventSource("events");
+  es.addEventListener("day", e => setDay(JSON.parse(e.data)));
+  es.addEventListener("now", e => setNow(JSON.parse(e.data)));
+  es.onopen = () => { clearInterval(fallback); fallback = null; };
+  // EventSource reconnects by itself; poll meanwhile so the page keeps up
+  es.onerror = () => { if (!fallback) { poll(); fallback = setInterval(poll, 5000); } };
+}
+
+function isPlaying() {
+  return !!(nowPlaying?.is_playing && Date.now() - nowAt < STALE_MS);
+}
+
+// the last 24h of finished plays, plus the track in the player as a growing slice
+function composedPlays() {
+  const t = Date.now(), cutoff = t - DAY_MS;
+  const list = dayPlays.filter(p => p.t1 > cutoff).map(p => ({ ...p, t0: Math.max(p.t0, cutoff) }));
+  const tr = nowPlaying?.track;
+  if (tr) {
+    const at = nowAt, playing = isPlaying();
+    const progress = Math.min(tr.duration_ms, (nowPlaying.progress_ms || 0) + (playing ? t - at : 0));
+    const t1 = playing ? t : at, last = list[list.length - 1];
+    const t0 = Math.max(t1 - progress, last ? last.t1 : cutoff, cutoff);
+    if (t1 > t0) list.push({ t0, t1, album: tr.album, img: tr.album_image, track: tr.name, artist: tr.artists[0], live: true });
+  }
+  return list.map(p => ({ ...p, sec: (p.t1 - p.t0) / 1000 }));
+}
+
+function runs(plays) {
+  const out = [];
+  for (const p of plays) {
+    const last = out[out.length - 1];
+    if (last && last.album === p.album) { last.sec += p.sec; last.tracks.push(p); }
+    else out.push({ album: p.album, img: p.img, sec: p.sec, tracks: [p] });
+  }
+  return out;
+}
+
+function topAlbum(plays) {
+  const m = new Map();
+  for (const p of plays) if (p.img) m.set(p.album, { sec: (m.get(p.album)?.sec || 0) + p.sec, img: p.img });
+  return [...m.values()].sort((a, b) => b.sec - a.sec)[0] || null;
+}
+
+// ---------- covers ----------
+const images = new Map();
+function image(url) {
+  if (!url) return null;
+  if (!images.has(url)) {
+    const img = new Image();
+    img.onload = () => redraw();
+    img.src = url;
+    images.set(url, img);
+  }
+  const img = images.get(url);
+  return img.complete && img.naturalWidth ? img : null;
+}
+
+// ---------- drawing ----------
+let redrawQueued = false;
+function redraw() {
+  if (redrawQueued) return;
+  redrawQueued = true;
+  requestAnimationFrame(() => { redrawQueued = false; drawDisc(); });
+}
+
+function drawDisc() {
+  const px = Math.round(canvas.clientWidth * (devicePixelRatio || 1));
+  if (px < 50) return;
+  if (canvas.width !== px) canvas.width = canvas.height = px;
+  const ctx = canvas.getContext("2d"), R = px / 2;
+  const rOut = R * 0.985, rArt = R * 0.97, rWax = R * 0.31, rLabel = R * 0.3;
+  const groove = Math.max(1, R * 0.006);
+  ctx.clearRect(0, 0, px, px);
+  ctx.fillStyle = "#0a0a0c"; ctx.beginPath(); ctx.arc(R, R, rOut, 0, 7); ctx.fill();
+
+  const plays = composedPlays(), rs = runs(plays), total = rs.reduce((a, r) => a + r.sec, 0);
+  let acc = 0;
+  for (const run of rs) {
+    const a0 = -Math.PI / 2 + 2 * Math.PI * acc / total, a1 = a0 + 2 * Math.PI * run.sec / total, am = (a0 + a1) / 2;
+    acc += run.sec;
+    ctx.save();
+    ctx.beginPath(); ctx.arc(R, R, rArt, a0, a1); ctx.arc(R, R, rWax, a1, a0, true); ctx.closePath(); ctx.clip();
+    // cover printed with its top facing outward, centred on the slice
+    const rm = (rArt + rWax) / 2, s = Math.max(rArt - rWax, rm * (a1 - a0)) * 1.12, im = image(run.img);
+    ctx.translate(R, R); ctx.rotate(am + Math.PI / 2);
+    if (im) ctx.drawImage(im, -s / 2, -rm - s / 2, s, s);
+    ctx.restore();
+
+    // one concentric band per track, first track on the outside like a real record;
+    // alternate bands are tinted and separated by a smooth gap with a lit edge
+    let f = 0;
+    run.tracks.forEach((t, k) => {
+      const rA = rArt - f * (rArt - rWax);
+      f += t.sec / run.sec;
+      const rB = rArt - f * (rArt - rWax);
+      if (k % 2) {
+        ctx.fillStyle = "rgba(0,0,0,.18)";
+        ctx.beginPath(); ctx.arc(R, R, rA, a0, a1); ctx.arc(R, R, rB, a1, a0, true); ctx.closePath(); ctx.fill();
+      }
+      if (k < run.tracks.length - 1) {
+        ctx.lineWidth = groove * 1.8; ctx.strokeStyle = "rgba(6,6,8,.9)";
+        ctx.beginPath(); ctx.arc(R, R, rB, a0, a1); ctx.stroke();
+        ctx.lineWidth = groove * 0.35; ctx.strokeStyle = "rgba(255,255,255,.28)";
+        ctx.beginPath(); ctx.arc(R, R, rB - groove * 1.1, a0, a1); ctx.stroke();
+      }
+    });
+    if (rs.length > 1) {
+      ctx.strokeStyle = "rgba(6,6,8,.85)"; ctx.lineWidth = groove * 0.6;
+      ctx.beginPath(); ctx.moveTo(R + rWax * Math.cos(a0), R + rWax * Math.sin(a0)); ctx.lineTo(R + rArt * Math.cos(a0), R + rArt * Math.sin(a0)); ctx.stroke();
+    }
+  }
+
+  // soften the art toward the edges so it sits *in* the vinyl
+  const shade = ctx.createRadialGradient(R, R, rWax, R, R, rArt);
+  shade.addColorStop(0, "rgba(0,0,0,.35)"); shade.addColorStop(0.12, "rgba(0,0,0,0)");
+  shade.addColorStop(0.9, "rgba(0,0,0,0)"); shade.addColorStop(1, "rgba(0,0,0,.45)");
+  ctx.fillStyle = shade; ctx.beginPath(); ctx.arc(R, R, rArt, 0, 7); ctx.arc(R, R, rWax, 0, 7, true); ctx.fill();
+
+  // label: what's playing, else the album of the day; then the spindle hole
+  const top = topAlbum(plays), playing = isPlaying();
+  const labelImg = image(playing ? nowPlaying.track?.album_image : top?.img);
+  ctx.save(); ctx.beginPath(); ctx.arc(R, R, rLabel, 0, 7); ctx.clip();
+  ctx.fillStyle = "#15151a"; ctx.fillRect(R - rLabel, R - rLabel, rLabel * 2, rLabel * 2);
+  if (labelImg) ctx.drawImage(labelImg, R - rLabel, R - rLabel, rLabel * 2, rLabel * 2);
+  const lshade = ctx.createRadialGradient(R, R, 0, R, R, rLabel);
+  lshade.addColorStop(0.75, "rgba(0,0,0,0)"); lshade.addColorStop(1, "rgba(0,0,0,.35)");
+  ctx.fillStyle = lshade; ctx.fillRect(R - rLabel, R - rLabel, rLabel * 2, rLabel * 2);
+  ctx.restore();
+  ctx.fillStyle = "#0c0c0f"; ctx.beginPath(); ctx.arc(R, R, R * 0.022, 0, 7); ctx.fill();
+
+  const bg = top ? `url("${top.img}")` : "none";
+  const backdrop = document.getElementById("backdrop");
+  if (backdrop.style.backgroundImage !== bg) backdrop.style.backgroundImage = bg;
+
+  const tr = nowPlaying?.track;
+  deck.setAttribute("aria-label", `The last 24 hours of listening as a vinyl record: ${plays.length} tracks.` +
+    (playing && tr ? ` Now playing ${tr.name} by ${tr.artists.join(", ")}.` : ""));
+}
+
+// ---------- spin: ease up when playing, coast down when paused, like a turntable ----------
+let angle = 0, speed = 0, last = performance.now();
+function frame(now) {
+  const dt = Math.min(0.1, (now - last) / 1000); last = now;
+  const playing = isPlaying(), target = playing && !reduceMotion ? RPM * 6 : 0;
+  speed += (target - speed) * (1 - Math.exp(-dt / (playing ? 0.9 : 2.2)));
+  if (speed > 0.001) { angle = (angle + speed * dt) % 360; canvas.style.transform = `rotate(${angle}deg)`; }
+  requestAnimationFrame(frame);
+}
+
+// ---------- layout & display niceties ----------
+function fit() {
+  document.documentElement.style.setProperty("--size", Math.min(innerWidth, innerHeight) * 0.86 + "px");
+  redraw();
+}
+addEventListener("resize", fit);
+addEventListener("click", () => document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen?.());
+let idleTimer;
+addEventListener("pointermove", () => {
+  document.body.classList.remove("idle");
+  clearTimeout(idleTimer); idleTimer = setTimeout(() => document.body.classList.add("idle"), 3000);
+});
+
+fit();
+connect();
+setInterval(() => { if (isPlaying()) redraw(); }, 2000);  // the live slice keeps growing
+requestAnimationFrame(frame);
+</script>
