@@ -46,7 +46,8 @@ LIVE_PORT = int(os.environ.get("WOT_LIVE_PORT", 8790))
 
 MIN_PLAY_MS = 30_000   # Spotify only counts a play after 30s
 GONE_GRACE = 300       # seconds the player may vanish before the loaded track counts as finished
-SAME_PLAY_S = 600      # an observed play and a Spotify play of the same track this close are one play
+SAME_PLAY_EARLY_S = 120   # Spotify may date a play slightly before the tracker saw it end...
+SAME_PLAY_LATE_S = 7200   # ...or long after, when it only logs it once the session closes
 
 SCOPE = "user-read-currently-playing user-read-playback-state user-read-recently-played"
 # Already registered on the Spotify app for the old Flask login flow.
@@ -263,16 +264,23 @@ def poll_recently_played(sp, db):
         ).rowcount
 
     # The same listen seen both ways: keep Spotify's row, with the duration the tracker observed.
+    # Spotify dates a play around when it ended, or much later when it only logs it as the session
+    # closes, so pair each observed play with the first Spotify row of that track in that window,
+    # unless another observed play of the track comes in between (that one is the better match).
     merged = 0
     for played_at, track_id, ms in db.execute(
-        "SELECT played_at, track_id, ms_played FROM plays WHERE source = 'observed'"
+        "SELECT played_at, track_id, ms_played FROM plays WHERE source = 'observed' ORDER BY played_at"
     ).fetchall():
         match = db.execute(
-            """SELECT played_at FROM plays
-               WHERE source = 'recently_played' AND track_id = ? AND ms_played IS NULL
-                 AND abs(julianday(played_at) - julianday(?)) * 86400 < ?
-               ORDER BY abs(julianday(played_at) - julianday(?)) LIMIT 1""",
-            (track_id, played_at, SAME_PLAY_S, played_at),
+            """SELECT a.played_at FROM plays a
+               WHERE a.source = 'recently_played' AND a.track_id = :track AND a.ms_played IS NULL
+                 AND (julianday(a.played_at) - julianday(:at)) * 86400 BETWEEN -:early AND :late
+                 AND NOT EXISTS (
+                   SELECT 1 FROM plays o
+                   WHERE o.source = 'observed' AND o.track_id = :track
+                     AND julianday(o.played_at) > julianday(:at) AND julianday(o.played_at) <= julianday(a.played_at))
+               ORDER BY a.played_at LIMIT 1""",
+            {"track": track_id, "at": played_at, "early": SAME_PLAY_EARLY_S, "late": SAME_PLAY_LATE_S},
         ).fetchone()
         if match:
             db.execute("UPDATE plays SET ms_played = ? WHERE played_at = ? AND track_id = ?", (ms, match[0], track_id))
