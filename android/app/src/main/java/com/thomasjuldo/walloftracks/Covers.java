@@ -28,6 +28,7 @@ final class Covers {
     static String medium(String url) { return url == null ? null : url.replace(LARGE, MEDIUM).replace(SMALL, MEDIUM); }
     static String small(String url) { return url == null ? null : url.replace(LARGE, SMALL).replace(MEDIUM, SMALL); }
 
+    private static final int COVER_BYTES = 300 * 300 * 4;  // one medium cover in memory
     private final LruCache<String, Bitmap> memory = new LruCache<String, Bitmap>(32 * 1024 * 1024) {
         @Override protected int sizeOf(String key, Bitmap b) { return b.getByteCount(); }
     };
@@ -51,6 +52,16 @@ final class Covers {
         if (b == null && (failed == null || System.currentTimeMillis() - failed > RETRY_MS) && loading.add(url))
             pool.execute(() -> load(url));
         return b;
+    }
+
+    /**
+     * Makes room for at least this many covers. Every redraw of the record needs all of today's covers, so a
+     * cache even slightly smaller than that evicts each one just before it's needed again: covers then flicker
+     * to black while they reload, and the reloading churns through memory.
+     */
+    void reserve(int count) {
+        int want = (int) Math.min(Integer.MAX_VALUE / 2, (long) count * COVER_BYTES * 5 / 4);
+        if (want > memory.maxSize()) memory.resize(want);
     }
 
     /** Whether the last attempt to get this cover failed (it is retried after a while). */
