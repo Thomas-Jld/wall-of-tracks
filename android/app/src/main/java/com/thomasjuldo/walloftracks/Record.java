@@ -97,28 +97,31 @@ final class Record {
         return new CoverColor(false, (Math.toDegrees(Math.atan2(y, x)) + 360) % 360, lw / w);
     }
 
-    private List<Play> day = new ArrayList<>();
-    private NowPlaying now;
-    private boolean dayLoaded;
+    // set on the main thread, read while the record is rebuilt on the render thread; each is replaced whole
+    private volatile List<Play> day = new ArrayList<>();
+    private volatile NowPlaying now;
+    private volatile boolean dayLoaded;
 
     void setDay(List<Play> plays) { day = plays; dayLoaded = true; }
     void setNow(NowPlaying n) { now = n; }
     List<Play> dayPlays() { return day; }
 
-    boolean isPlaying(long t) { return now != null && now.playing && t - now.receivedAt < STALE_MS; }
+    boolean isPlaying(long t) { return isPlaying(now, t); }
+    private static boolean isPlaying(NowPlaying n, long t) { return n != null && n.playing && t - n.receivedAt < STALE_MS; }
 
     /** The last 24h of finished plays, plus the track in the player as a growing slice. */
     List<Play> composed(long t) {
         long cutoff = t - DAY_MS;
+        NowPlaying n = now;
         List<Play> list = new ArrayList<>();
         for (Play p : day) if (p.t1 > cutoff) list.add(new Play(Math.max(p.t0, cutoff), p.t1, p.album, p.img));
-        if (now != null && now.album != null) {
-            boolean playing = isPlaying(t);
-            long progress = Math.min(now.durationMs, now.progressMs + (playing ? t - now.receivedAt : 0));
-            long t1 = playing ? t : now.receivedAt;
+        if (n != null && n.album != null) {
+            boolean playing = isPlaying(n, t);
+            long progress = Math.min(n.durationMs, n.progressMs + (playing ? t - n.receivedAt : 0));
+            long t1 = playing ? t : n.receivedAt;
             long last = list.isEmpty() ? cutoff : list.get(list.size() - 1).t1;
             long t0 = Math.max(t1 - progress, Math.max(last, cutoff));
-            if (t1 > t0) list.add(new Play(t0, t1, now.album, now.img));
+            if (t1 > t0) list.add(new Play(t0, t1, n.album, n.img));
         }
         return list;
     }
@@ -138,7 +141,7 @@ final class Record {
     // so growing, shrinking and arriving slide instead of jumping.
     private final LinkedHashMap<String, Slice> shown = new LinkedHashMap<>();
     private long easedAt;
-    boolean easing;
+    volatile boolean easing;  // written by the render thread, read by the frame loop
 
     private List<Slice> eased(List<Slice> slices, long uptime) {
         // a long gap between draws (nothing was changing) must not count as time already spent easing
@@ -189,7 +192,8 @@ final class Record {
 
     /** What the label (and the blurred background) shows: the playing album, else the album of the day. */
     String labelImage(long t) {
-        if (isPlaying(t) && now.img != null) return now.img;
+        NowPlaying n = now;
+        if (isPlaying(n, t) && n.img != null) return n.img;
         Slice top = topAlbum(composed(t));
         return top == null ? null : top.img;
     }
