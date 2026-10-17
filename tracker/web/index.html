@@ -152,7 +152,9 @@ function easedSlices(slices) {
   for (const [album, d] of shown) {
     const g = goal.get(album) || 0;
     d.share += (g - d.share) * k;
-    if (Math.abs(g - d.share) > 2e-4) easing = true; else d.share = g;
+    // steps under 0.1% of the disc (the playing album's steady growth) aren't visible as jumps: snap them,
+    // so the easing only runs for real changes instead of redrawing all the time
+    if (Math.abs(g - d.share) > 1e-3) easing = true; else d.share = g;
     if (!g && !d.share) shown.delete(album);  // aged out of the window
   }
   const sum = [...shown.values()].reduce((a, d) => a + d.share, 0) || 1;
