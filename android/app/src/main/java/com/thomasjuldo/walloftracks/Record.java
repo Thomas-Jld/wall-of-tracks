@@ -42,6 +42,61 @@ final class Record {
         Slice(String album, String img) { this.album = album; this.img = img; }
     }
 
+    // ---------- slice order: around the colour wheel, clockwise from the top: red, orange, yellow ... magenta,
+    // then a monochrome sector from black to white that closes the circle (same as the web page) ----------
+    static final class CoverColor {
+        final boolean neutral;
+        final double hue, light;
+        CoverColor(boolean neutral, double hue, double light) { this.neutral = neutral; this.hue = hue; this.light = light; }
+    }
+    // a cover that can't be had (none, or it failed to load) still gets a place: a dark slice among the neutrals
+    private static final CoverColor NO_COVER = new CoverColor(true, 0, 0);
+    private final Map<String, CoverColor> colors = new HashMap<>();
+
+    private CoverColor colorOf(String img, Covers covers) {
+        if (img == null) return NO_COVER;
+        CoverColor c = colors.get(img);
+        if (c != null) return c;
+        String url = Covers.medium(img);
+        Bitmap b = covers.get(url);
+        if (b != null) colors.put(img, c = measure(b));
+        else if (covers.failed(url)) c = NO_COVER;  // not cached: retried once the cover comes back
+        return c;
+    }
+
+    // hues just below red wrap to the start so reds stay together
+    private static double wheelKey(CoverColor c) { return c.neutral ? 400 + c.light : (c.hue + 20) % 360; }
+
+    /** A cover's dominant hue (an average would turn a red-and-blue cover purple), or neutral and how light. */
+    static CoverColor measure(Bitmap cover) {
+        int n = 32;
+        int[] px = new int[n * n];
+        Bitmap.createScaledBitmap(cover, n, n, true).getPixels(px, 0, n, 0, 0, n, n);
+        double[] bins = new double[24], binLight = new double[24];
+        double chromaSum = 0, lightSum = 0;
+        for (int p : px) {
+            double r = ((p >> 16) & 255) / 255.0, g = ((p >> 8) & 255) / 255.0, b = (p & 255) / 255.0;
+            double mx = Math.max(r, Math.max(g, b)), mn = Math.min(r, Math.min(g, b)), l = (mx + mn) / 2, d = mx - mn;
+            lightSum += l;
+            if (d == 0) continue;
+            double sat = d / (1 - Math.abs(2 * l - 1)), chroma = sat * (1 - Math.abs(2 * l - 1));
+            if (chroma < 0.12) continue;
+            double h = mx == r ? ((g - b) / d + 6) % 6 : mx == g ? (b - r) / d + 2 : (r - g) / d + 4;
+            int bin = (int) Math.floor(h * 60 / 15) % 24;
+            bins[bin] += chroma; binLight[bin] += chroma * l; chromaSum += chroma;
+        }
+        if (chromaSum / px.length < 0.06) return new CoverColor(true, 0, lightSum / px.length);
+        int best = 0;
+        for (int i = 1; i < 24; i++) if (bins[i] > bins[best]) best = i;
+        double x = 0, y = 0, w = 0, lw = 0;  // refine the peak with its neighbours (circular mean)
+        for (int k = best - 1; k <= best + 1; k++) {
+            int i = (k + 24) % 24;
+            double a = Math.toRadians((i + 0.5) * 15);
+            x += Math.cos(a) * bins[i]; y += Math.sin(a) * bins[i]; w += bins[i]; lw += binLight[i];
+        }
+        return new CoverColor(false, (Math.toDegrees(Math.atan2(y, x)) + 360) % 360, lw / w);
+    }
+
     private List<Play> day = new ArrayList<>();
     private NowPlaying now;
     private boolean dayLoaded;
@@ -79,8 +134,8 @@ final class Record {
         return new ArrayList<>(byAlbum.values());
     }
 
-    // What the record shows: each album keeps the place it got when first seen (so slices never swap),
-    // and its share of the disc eases toward the real one (so growing, shrinking and arriving slide).
+    // What the record shows: each album's share of the disc eases toward the real one,
+    // so growing, shrinking and arriving slide instead of jumping.
     private final LinkedHashMap<String, Slice> shown = new LinkedHashMap<>();
     private long easedAt;
     boolean easing;
@@ -115,7 +170,14 @@ final class Record {
             s.share = d.share / (sum == 0 ? 1 : sum);
             out.add(s);
         }
+        // a colour's place is fixed, so this never swaps slices either: newcomers grow in at their colour
+        out.sort((a, b) -> Double.compare(wheelKey(colorOrNoCover(a.img)), wheelKey(colorOrNoCover(b.img))));
         return out;
+    }
+
+    private CoverColor colorOrNoCover(String img) {
+        CoverColor c = img == null ? null : colors.get(img);
+        return c == null ? NO_COVER : c;
     }
 
     /** The album of the day: the one with the most listening in the window. */
@@ -158,8 +220,11 @@ final class Record {
         c.drawCircle(R, R, rOut, fill);
 
         // wait for the day's plays, so the first albums placed are the oldest rather than whatever plays now
+        // an album joins once its cover (and so its colour) is known
         List<Play> plays = composed(t);
-        List<Slice> slices = dayLoaded ? eased(albumSlices(plays), uptime) : new ArrayList<>();
+        List<Slice> placed = new ArrayList<>();
+        for (Slice s : albumSlices(plays)) if (colorOf(s.img, covers) != null) placed.add(s);
+        List<Slice> slices = dayLoaded ? eased(placed, uptime) : new ArrayList<>();
         double acc = 0;
         for (Slice run : slices) {
             double a0 = -Math.PI / 2 + 2 * Math.PI * acc, a1 = a0 + 2 * Math.PI * run.share;

@@ -158,7 +158,10 @@ function easedSlices(slices) {
     if (!g && !d.share) shown.delete(album);  // aged out of the window
   }
   const sum = [...shown.values()].reduce((a, d) => a + d.share, 0) || 1;
-  return [...shown].map(([album, d]) => ({ album, img: d.img, share: d.share / sum })).filter(s => s.share > 0);
+  const out = [...shown].map(([album, d]) => ({ album, img: d.img, share: d.share / sum })).filter(s => s.share > 0);
+  // a colour's place is fixed, so this never swaps slices either: newcomers grow in at their colour
+  if (ORDER === "color") out.sort((a, b) => wheelKey(colorFor(a.img)) - wheelKey(colorFor(b.img)));
+  return out;
 }
 
 function topAlbum(plays) {
@@ -167,6 +170,51 @@ function topAlbum(plays) {
   return [...m.values()].sort((a, b) => b.sec - a.sec)[0] || null;
 }
 
+// ---------- slice order: around the colour wheel (default), or as first seen (?order=seen) ----------
+const ORDER = new URLSearchParams(location.search).get("order") === "seen" ? "seen" : "color";
+const coverColor = new Map();  // cover url -> { neutral, hue, light }
+
+function hsl(r, g, b) {
+  r /= 255; g /= 255; b /= 255;
+  const mx = Math.max(r, g, b), mn = Math.min(r, g, b), l = (mx + mn) / 2, d = mx - mn;
+  if (!d) return [0, 0, l];
+  const s = d / (1 - Math.abs(2 * l - 1)), h = mx === r ? ((g - b) / d + 6) % 6 : mx === g ? (b - r) / d + 2 : (r - g) / d + 4;
+  return [h * 60, s, l];
+}
+// A cover's colour is its dominant hue (an average would turn a red-and-blue cover purple);
+// covers with little colour overall are neutral, placed by how light they are.
+function measureColor(img) {
+  const n = 32, c = document.createElement("canvas");
+  c.width = c.height = n;
+  const g = c.getContext("2d", { willReadFrequently: true });
+  g.drawImage(img, 0, 0, n, n);
+  const px = g.getImageData(0, 0, n, n).data, bins = new Array(24).fill(0), binLight = new Array(24).fill(0);
+  let chromaSum = 0, lightSum = 0;
+  for (let i = 0; i < px.length; i += 4) {
+    const [h, sat, l] = hsl(px[i], px[i + 1], px[i + 2]), chroma = sat * (1 - Math.abs(2 * l - 1));
+    lightSum += l;
+    if (chroma < 0.12) continue;
+    const b = Math.floor(h / 15) % 24;
+    bins[b] += chroma; binLight[b] += chroma * l; chromaSum += chroma;
+  }
+  const count = px.length / 4;
+  if (chromaSum / count < 0.06) return { neutral: true, light: lightSum / count };
+  let best = 0;
+  for (let b = 1; b < 24; b++) if (bins[b] > bins[best]) best = b;
+  let x = 0, y = 0, w = 0, lw = 0;  // refine the peak with its neighbours (circular mean)
+  for (const b of [best - 1, best, best + 1]) {
+    const k = (b + 24) % 24, a = (k + 0.5) * 15 * Math.PI / 180;
+    x += Math.cos(a) * bins[k]; y += Math.sin(a) * bins[k]; w += bins[k]; lw += binLight[k];
+  }
+  return { neutral: false, hue: (Math.atan2(y, x) * 180 / Math.PI + 360) % 360, light: lw / w };
+}
+// clockwise from the top: red, orange, yellow ... magenta, then a monochrome sector from black to white
+// that closes the circle; hues just below red wrap to the start so reds stay together
+const wheelKey = c => c.neutral ? 400 + c.light : (c.hue + 20) % 360;
+// a cover that can't be had (none, or it failed to load) still gets a place: a dark slice among the neutrals
+const NO_COVER = { neutral: true, light: 0 };
+const colorFor = url => url ? coverColor.get(url) : NO_COVER;
+
 // ---------- covers ----------
 const images = new Map();
 function image(url) {
@@ -174,7 +222,11 @@ function image(url) {
   if (!images.has(url)) {
     const img = new Image();
     img.crossOrigin = "anonymous";  // so the flow layer may use the drawn record as a texture
-    img.onload = () => redraw();
+    img.onload = () => {
+      if (ORDER === "color") { try { coverColor.set(url, measureColor(img)); } catch { coverColor.set(url, NO_COVER); } }
+      redraw();
+    };
+    img.onerror = () => { coverColor.set(url, NO_COVER); redraw(); };
     img.src = url;
     images.set(url, img);
   }
@@ -233,8 +285,12 @@ function drawDisc() {
   ctx.clearRect(0, 0, px, px);
   ctx.fillStyle = "#0a0a0c"; ctx.beginPath(); ctx.arc(R, R, rOut, 0, 7); ctx.fill();
 
-  // wait for the day's plays, so the first albums placed are the oldest rather than whatever plays now
-  const plays = composedPlays(), rs = dayLoaded ? easedSlices(albumSlices(plays)) : [];
+  // wait for the day's plays, so the first albums placed are the oldest rather than whatever plays now;
+  // in colour order an album joins once its cover (and so its colour) has loaded
+  const plays = composedPlays();
+  let slices = albumSlices(plays);
+  if (ORDER === "color") slices = slices.filter(s => colorFor(s.img));
+  const rs = dayLoaded ? easedSlices(slices) : [];
   let acc = 0;
   for (const run of rs) {
     const a0 = -Math.PI / 2 + 2 * Math.PI * acc, a1 = a0 + 2 * Math.PI * run.share;

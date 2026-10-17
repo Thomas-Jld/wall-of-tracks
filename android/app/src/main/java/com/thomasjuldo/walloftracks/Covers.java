@@ -14,6 +14,7 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.file.Files;
 import java.security.MessageDigest;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
@@ -30,7 +31,9 @@ final class Covers {
     private final LruCache<String, Bitmap> memory = new LruCache<String, Bitmap>(32 * 1024 * 1024) {
         @Override protected int sizeOf(String key, Bitmap b) { return b.getByteCount(); }
     };
+    private static final long RETRY_MS = 5 * 60_000;  // a cover that failed isn't asked for again on every frame
     private final Set<String> loading = ConcurrentHashMap.newKeySet();
+    private final Map<String, Long> failedAt = new ConcurrentHashMap<>();
     private final ExecutorService pool = Executors.newFixedThreadPool(4);
     private final File dir;
     private final Runnable onLoaded;
@@ -44,9 +47,14 @@ final class Covers {
     Bitmap get(String url) {
         if (url == null) return null;
         Bitmap b = memory.get(url);
-        if (b == null && loading.add(url)) pool.execute(() -> load(url));
+        Long failed = failedAt.get(url);
+        if (b == null && (failed == null || System.currentTimeMillis() - failed > RETRY_MS) && loading.add(url))
+            pool.execute(() -> load(url));
         return b;
     }
+
+    /** Whether the last attempt to get this cover failed (it is retried after a while). */
+    boolean failed(String url) { return url != null && failedAt.containsKey(url); }
 
     private void load(String url) {
         try {
@@ -54,12 +62,17 @@ final class Covers {
             byte[] data = file.exists() ? Files.readAllBytes(file.toPath()) : download(url);
             if (!file.exists()) try (FileOutputStream out = new FileOutputStream(file)) { out.write(data); }
             Bitmap b = BitmapFactory.decodeByteArray(data, 0, data.length);
-            if (b != null) {
-                memory.put(url, b);
-                onLoaded.run();
+            if (b == null) {
+                file.delete();  // a damaged cached copy: download it afresh next time
+                throw new IOException("not an image");
             }
+            memory.put(url, b);
+            failedAt.remove(url);
+            onLoaded.run();
         } catch (Exception e) {
             Log.w("WallOfTracks", "cover " + url + ": " + e);
+            failedAt.put(url, System.currentTimeMillis());
+            onLoaded.run();  // so the record can place the album without its cover
         } finally {
             loading.remove(url);
         }
