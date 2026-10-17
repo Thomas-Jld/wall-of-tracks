@@ -71,11 +71,12 @@ const canvas = document.getElementById("disc"), deck = document.getElementById("
 const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
 
 // nowAt is when *this browser* received the player state, so a skewed clock doesn't matter
-let dayPlays = [], nowPlaying = null, nowAt = 0;
+let dayPlays = [], nowPlaying = null, nowAt = 0, dayLoaded = false;
 
 // ---------- data: read once on load, then pushed live, with plain polling as a fallback ----------
 function setDay(d) {
   dayPlays = d.plays.map(p => ({ ...p, t0: Date.parse(p.t0), t1: Date.parse(p.t1) }));
+  dayLoaded = true;
   dayPlays.forEach(p => image(p.img));  // start downloading covers now, not only once something is drawn
   redraw();
 }
@@ -126,7 +127,7 @@ function composedPlays() {
   return list.map(p => ({ ...p, sec: (p.t1 - p.t0) / 1000 }));
 }
 
-// one slice per album, sized by its listening in the last 24h, biggest first
+// one slice per album, sized by its listening in the last 24h, in the order albums first appeared
 function albumSlices(plays) {
   const byAlbum = new Map();
   for (const p of plays) {
@@ -134,7 +135,28 @@ function albumSlices(plays) {
     if (!s) byAlbum.set(p.album, s = { album: p.album, img: p.img, sec: 0 });
     s.sec += p.sec;
   }
-  return [...byAlbum.values()].sort((a, b) => b.sec - a.sec);
+  return [...byAlbum.values()];
+}
+
+// What the record shows: each album keeps the place it got when first seen (so slices never swap),
+// and its share of the disc eases toward the real one (so growing, shrinking and arriving slide).
+const shown = new Map();  // album -> { img, share }; insertion order is the order around the disc
+let easedAt = 0, easing = false;
+function easedSlices(slices) {
+  // a long gap between draws (nothing was changing) must not count as time already spent easing
+  const now = performance.now(), k = easedAt ? 1 - Math.exp(-Math.min(now - easedAt, 100) / 1000) : 1;
+  easedAt = now;
+  const total = slices.reduce((a, s) => a + s.sec, 0) || 1, goal = new Map(slices.map(s => [s.album, s.sec / total]));
+  for (const s of slices) if (!shown.has(s.album)) shown.set(s.album, { img: s.img, share: 0 });
+  easing = false;
+  for (const [album, d] of shown) {
+    const g = goal.get(album) || 0;
+    d.share += (g - d.share) * k;
+    if (Math.abs(g - d.share) > 2e-4) easing = true; else d.share = g;
+    if (!g && !d.share) shown.delete(album);  // aged out of the window
+  }
+  const sum = [...shown.values()].reduce((a, d) => a + d.share, 0) || 1;
+  return [...shown].map(([album, d]) => ({ album, img: d.img, share: d.share / sum })).filter(s => s.share > 0);
 }
 
 function topAlbum(plays) {
@@ -209,11 +231,12 @@ function drawDisc() {
   ctx.clearRect(0, 0, px, px);
   ctx.fillStyle = "#0a0a0c"; ctx.beginPath(); ctx.arc(R, R, rOut, 0, 7); ctx.fill();
 
-  const plays = composedPlays(), rs = albumSlices(plays), total = rs.reduce((a, r) => a + r.sec, 0);
+  // wait for the day's plays, so the first albums placed are the oldest rather than whatever plays now
+  const plays = composedPlays(), rs = dayLoaded ? easedSlices(albumSlices(plays)) : [];
   let acc = 0;
   for (const run of rs) {
-    const a0 = -Math.PI / 2 + 2 * Math.PI * acc / total, a1 = a0 + 2 * Math.PI * run.sec / total;
-    acc += run.sec;
+    const a0 = -Math.PI / 2 + 2 * Math.PI * acc, a1 = a0 + 2 * Math.PI * run.share;
+    acc += run.share;
     // positions inside a slice: u across it (0..1), d from its inner edge to its outer edge (0..1)
     const angle = (u, d) => { const base = a0 + u * (a1 - a0); return base + shape.off(d, base); };
     const at = (u, d) => { const a = angle(u, d), r = rWax + span * d; return [R + r * Math.cos(a), R + r * Math.sin(a)]; };
@@ -255,6 +278,7 @@ function drawDisc() {
   ctx.fillStyle = "#0c0c0f"; ctx.beginPath(); ctx.arc(R, R, R * 0.022, 0, 7); ctx.fill();
 
   if (style === "flow") uploadFlow();
+  if (easing) setTimeout(redraw, 33);  // keep sliding at ~30 fps until every slice has arrived
   setBackdrop(playing ? nowPlaying.track?.album_image : top?.img);
 
   const tr = nowPlaying?.track;
