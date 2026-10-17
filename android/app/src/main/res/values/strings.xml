@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Wall of Tracks</string>
+    <string name="description">The last 24 hours of your listening as a slowly turning record. Double tap to switch style.</string>
+</resources>

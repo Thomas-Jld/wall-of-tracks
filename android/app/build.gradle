@@ -1,0 +1,21 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.thomasjuldo.walloftracks'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId 'com.thomasjuldo.walloftracks'
+        minSdk 33          // AGSL shaders (RuntimeShader) arrived in Android 13
+        targetSdk 34
+        versionCode 1
+        versionName '0.1'
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
