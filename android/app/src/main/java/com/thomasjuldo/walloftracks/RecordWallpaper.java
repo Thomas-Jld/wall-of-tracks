@@ -15,12 +15,15 @@ import android.graphics.Shader;
 import android.graphics.SweepGradient;
 import android.os.Bundle;
 import android.os.Handler;
+import android.os.HandlerThread;
 import android.os.Looper;
 import android.os.PowerManager;
 import android.os.SystemClock;
 import android.provider.Settings;
 import android.service.wallpaper.WallpaperService;
 import android.util.Log;
+import android.view.Choreographer;
+import android.view.Surface;
 import android.view.SurfaceHolder;
 
 import java.util.List;
@@ -29,7 +32,8 @@ import java.util.List;
 public final class RecordWallpaper extends WallpaperService {
     private static final float RPM = 2.5f;      // slow on purpose: it's a wall piece, not a turntable
     private static final int BG = 0xFF0C0C0F;
-    private static final long FRAME_MS = 33;    // ~30 fps is plenty for this slow motion
+    private static final long FRAME_NS = 33_333_333;  // a steady 30 fps is plenty for this slow motion
+    private static final long SLACK_NS = 4_000_000;   // a vsync this close to the next frame time counts as on time
 
     // the drawn record, slowly marbled; the label and the rim stay still (same as the web page's flow)
     private static final String FLOW = """
@@ -67,13 +71,17 @@ public final class RecordWallpaper extends WallpaperService {
 
     private final class RecordEngine extends Engine implements LiveFeed.Listener {
         private final Handler main = new Handler(Looper.getMainLooper());
-        private final Runnable frameRunnable = this::frame;
+        private final Choreographer.FrameCallback vsync = this::onVsync;
+        private final Runnable wake = this::requestFrame;
+        // the record is rebuilt from its covers here, so that work never delays a frame
+        private HandlerThread renderThread;
+        private Handler renderer;
         private final Record record = new Record();
         private Covers covers;
         private LiveFeed feed;
         private SharedPreferences prefs;
 
-        private boolean visible, frameQueued, motion = true;
+        private boolean visible, frameQueued, rendering, motion = true;
         private int width, height, D;
         private float cx, cy;
 
@@ -94,7 +102,11 @@ public final class RecordWallpaper extends WallpaperService {
 
         // spin: eases up when playing, coasts down when paused, like a turntable; the flow moves with it
         private float angle, speed, flowTime;
-        private long lastFrame;
+        private long lastDrawNanos;
+        // frame pacing check, off unless `adb shell setprop log.tag.WallOfTracks DEBUG`:
+        // logs every 10s how many vsyncs apart drawn frames were
+        private final int[] pacing = new int[8];
+        private long pacingSince, lastVsyncNanos, vsyncPeriodNanos = 8_333_333;
 
         // background: the label's cover, blurred, cross-fading when it changes; drifts with home-screen pages
         private String backdropUrl;
@@ -109,6 +121,9 @@ public final class RecordWallpaper extends WallpaperService {
             prefs = getSharedPreferences("wall-of-tracks", MODE_PRIVATE);
             organicFlow = !"classic".equals(prefs.getString("style", "flow"));
             covers = new Covers(getCacheDir(), () -> main.post(this::invalidateDisc));
+            renderThread = new HandlerThread("wot-render");
+            renderThread.start();
+            renderer = new Handler(renderThread.getLooper());
             feed = new LiveFeed(this);
             try {
                 flow = new RuntimeShader(FLOW);
@@ -143,6 +158,10 @@ public final class RecordWallpaper extends WallpaperService {
             sheen.setStrokeWidth(R * (1 - 0.27f));
             sheen.setBlendMode(BlendMode.SCREEN);
             rim.setStrokeWidth(Math.max(1, R * 0.003f));
+            try {  // a hint: lets the display pick a refresh rate that 30 fps divides evenly
+                holder.getSurface().setFrameRate(30f, Surface.FRAME_RATE_COMPATIBILITY_DEFAULT);
+            } catch (RuntimeException ignored) {
+            }
             discs[0] = discs[1] = null;
             invalidateDisc();
         }
@@ -151,26 +170,26 @@ public final class RecordWallpaper extends WallpaperService {
             visible = v;
             if (v) {
                 motion = motionAllowed();
-                lastFrame = SystemClock.uptimeMillis();
+                lastDrawNanos = 0;
                 feed.start();
                 requestFrame();
             } else {
                 feed.stop();  // nothing to show, nothing to fetch
-                main.removeCallbacks(frameRunnable);
-                frameQueued = false;
+                stopFrames();
             }
         }
 
         @Override public void onSurfaceDestroyed(SurfaceHolder holder) {
             visible = false;
-            main.removeCallbacks(frameRunnable);
-            frameQueued = false;
+            stopFrames();
             super.onSurfaceDestroyed(holder);
         }
 
         @Override public void onDestroy() {
             feed.shutdown();
             covers.shutdown();
+            stopFrames();
+            renderThread.quitSafely();
             main.removeCallbacksAndMessages(null);
             super.onDestroy();
         }
@@ -211,8 +230,14 @@ public final class RecordWallpaper extends WallpaperService {
         private void requestFrame() {
             if (visible && !frameQueued) {
                 frameQueued = true;
-                main.post(frameRunnable);
+                Choreographer.getInstance().postFrameCallback(vsync);
             }
+        }
+
+        private void stopFrames() {
+            Choreographer.getInstance().removeFrameCallback(vsync);
+            main.removeCallbacks(wake);
+            frameQueued = false;
         }
 
         private boolean motionAllowed() {  // honour "remove animations" and battery saver
@@ -221,13 +246,23 @@ public final class RecordWallpaper extends WallpaperService {
             return scale > 0 && !(pm != null && pm.isPowerSaveMode());
         }
 
-        // ---------- the loop: ~30 fps while something moves, a redraw every 2s while a paused-motion song plays, else idle ----------
-        private void frame() {
+        // ---------- the loop: a steady 30 fps on vsync while something moves; a redraw every 2s while a
+        // song plays with motion off; otherwise idle until data changes ----------
+        private void onVsync(long frameNanos) {
             frameQueued = false;
+            if (lastVsyncNanos != 0 && frameNanos - lastVsyncNanos < 40_000_000) vsyncPeriodNanos = frameNanos - lastVsyncNanos;
+            lastVsyncNanos = frameNanos;
             if (!visible || D == 0) return;
+            // Draw on the first vsync at least a frame after the last drawn one: every 4th vsync at 120 Hz, every
+            // 2nd at 60 Hz. A timer drifts against the display, landing frames 4 or 5 vsyncs apart: a stutter.
+            if (lastDrawNanos != 0 && frameNanos - lastDrawNanos < FRAME_NS - SLACK_NS) {
+                requestFrame();
+                return;
+            }
+            float dt = lastDrawNanos == 0 ? 0 : Math.min(0.1f, (frameNanos - lastDrawNanos) / 1e9f);
+            if (lastDrawNanos != 0 && Log.isLoggable("WallOfTracks", Log.DEBUG)) logPacing(frameNanos);
+            lastDrawNanos = frameNanos;
             long up = SystemClock.uptimeMillis(), wall = System.currentTimeMillis();
-            float dt = Math.min(0.1f, (up - lastFrame) / 1000f);
-            lastFrame = up;
 
             boolean playing = record.isPlaying(wall);
             float full = RPM * 6, target = playing && motion ? full : 0;
@@ -236,32 +271,61 @@ public final class RecordWallpaper extends WallpaperService {
             angle = (angle + speed * dt) % 360;
             flowTime += dt * speed / full;
 
-            // the playing album's slice keeps growing; slices that are easing redraw at ~15 fps
+            // the playing album's slice keeps growing; slices that are easing are rebuilt at ~15 fps
             if (playing && wall - renderedAt > 2000) discDirty = true;
-            if (discDirty || (record.easing && up - renderedUptime > 66)) renderDisc(wall, up);
+            if (discDirty || (record.easing && up - renderedUptime > 66)) requestRender();
             updateBackdrop(wall);
             if (fade < 1) fade = Math.min(1, fade + dt / 2.5f);
 
             draw();
 
-            boolean moving = speed > 0 || record.easing || fade < 1;
-            long next = moving ? FRAME_MS : playing ? 2000 : -1;
-            if (next >= 0) {
-                frameQueued = true;
-                main.postDelayed(frameRunnable, next);
+            if (speed > 0 || record.easing || fade < 1) {
+                requestFrame();
+            } else {
+                lastDrawNanos = 0;  // idle: the next frame starts from rest
+                if (playing) main.postDelayed(wake, 2000);
             }
         }
 
-        private void renderDisc(long wall, long up) {
-            int i = front ^ 1;
-            if (discs[i] == null || discs[i].getWidth() != D) discs[i] = Bitmap.createBitmap(D, D, Bitmap.Config.ARGB_8888);
-            discs[i].eraseColor(0);
-            record.render(new Canvas(discs[i]), D, organicFlow, covers, wall, up);
-            front = i;
+        private void logPacing(long frameNanos) {
+            int vsyncs = (int) Math.round((frameNanos - lastDrawNanos) / (double) vsyncPeriodNanos);
+            pacing[Math.min(pacing.length - 1, Math.max(0, vsyncs))]++;
+            if (pacingSince == 0) pacingSince = frameNanos;
+            if (frameNanos - pacingSince > 10_000_000_000L) {
+                StringBuilder line = new StringBuilder("pacing at " + Math.round(1e9 / vsyncPeriodNanos) + " Hz, vsyncs apart -> frames:");
+                for (int i = 0; i < pacing.length; i++) if (pacing[i] > 0) line.append(' ').append(i).append('=').append(pacing[i]);
+                Log.d("WallOfTracks", line.toString());
+                java.util.Arrays.fill(pacing, 0);
+                pacingSince = frameNanos;
+            }
+        }
+
+        /** Rebuilds the record into the bitmap that isn't on screen, off the main thread, then swaps it in. */
+        private void requestRender() {
+            if (rendering) return;  // one at a time; changes made meanwhile are picked up by the next one
+            rendering = true;
             discDirty = false;
-            renderedAt = wall;
-            renderedUptime = up;
-            if (flow != null) flow.setInputShader("tex", new BitmapShader(discs[front], Shader.TileMode.CLAMP, Shader.TileMode.CLAMP));
+            final int i = front ^ 1, size = D;
+            final boolean organic = organicFlow;
+            final Bitmap reuse = discs[i];
+            renderer.post(() -> {
+                Bitmap b = reuse != null && reuse.getWidth() == size ? reuse : Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888);
+                b.eraseColor(0);
+                record.render(new Canvas(b), size, organic, covers, System.currentTimeMillis(), SystemClock.uptimeMillis());
+                main.post(() -> {
+                    rendering = false;
+                    if (size != D) {  // the surface changed size meanwhile
+                        invalidateDisc();
+                        return;
+                    }
+                    discs[i] = b;
+                    front = i;
+                    renderedAt = System.currentTimeMillis();
+                    renderedUptime = SystemClock.uptimeMillis();
+                    if (flow != null) flow.setInputShader("tex", new BitmapShader(b, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP));
+                    requestFrame();
+                });
+            });
         }
 
         private void updateBackdrop(long wall) {
