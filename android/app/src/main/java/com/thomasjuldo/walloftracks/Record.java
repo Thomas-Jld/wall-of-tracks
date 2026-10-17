@@ -222,8 +222,10 @@ final class Record {
         // wait for the day's plays, so the first albums placed are the oldest rather than whatever plays now
         // an album joins once its cover (and so its colour) is known
         List<Play> plays = composed(t);
+        List<Slice> albums = albumSlices(plays);
+        covers.reserve(albums.size() + shown.size() + 2);  // today's covers, those still fading out, and the label's
         List<Slice> placed = new ArrayList<>();
-        for (Slice s : albumSlices(plays)) if (colorOf(s.img, covers) != null) placed.add(s);
+        for (Slice s : albums) if (colorOf(s.img, covers) != null) placed.add(s);
         List<Slice> slices = dayLoaded ? eased(placed, uptime) : new ArrayList<>();
         double acc = 0;
         for (Slice run : slices) {
