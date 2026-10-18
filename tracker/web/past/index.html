@@ -6,9 +6,11 @@
   html, body { margin: 0; height: 100%; background: #0c0c0f; overflow: hidden; font: 13px system-ui, sans-serif; color: #ddd; }
   body.idle { cursor: none; }
   canvas { display: block; width: 100vw; height: 100vh; }
-  nav { position: fixed; left: 50%; bottom: calc(14px + env(safe-area-inset-bottom, 0px)); transform: translateX(-50%);
+  [hidden] { display: none !important; }  /* or the canvas rule above keeps a hidden layer on screen */
+  nav { position: fixed; left: 0; right: 0; margin-inline: auto; width: fit-content; bottom: calc(14px + env(safe-area-inset-bottom, 0px));
         display: flex; gap: 4px; align-items: center; background: rgba(0,0,0,.6); padding: 5px; border-radius: 10px;
-        backdrop-filter: blur(8px); white-space: nowrap; transition: opacity .6s; }
+        backdrop-filter: blur(8px); white-space: nowrap; transition: opacity .6s;
+        max-width: calc(100vw - 24px); flex-wrap: wrap; justify-content: center; }  /* wraps on a phone */
   body.idle nav { opacity: 0; pointer-events: none; }
   nav a { color: #aaa; text-decoration: none; padding: 6px 10px; border-radius: 6px; }
   nav a:hover, nav button:hover { color: #fff; }
@@ -35,12 +37,15 @@ const VARIANTS = [[64, "ab67616d00004851"], [300, "ab67616d00001e02"], [640, "ab
 const VARIANT_RE = /ab67616d0000(?:4851|1e02|b273)/;
 const images = new Map();
 let imagesVersion = 0, versionTimer = null;
+function coversArrived() {  // batch arrivals, then let cached renders pick the new covers up
+  if (!versionTimer) versionTimer = setTimeout(() => { versionTimer = null; imagesVersion++; renders.clear(); requestDraw(); }, 250);
+}
 function image(url) {
   if (!images.has(url)) {
     const im = new Image();
-    im.onload = () => {  // batch arrivals, then let cached renders pick the new covers up
-      if (!versionTimer) versionTimer = setTimeout(() => { versionTimer = null; imagesVersion++; renders.clear(); requestDraw(); }, 250);
-    };
+    im.crossOrigin = "anonymous";  // so Diary can read a cover's colour
+    im.onload = coversArrived;
+    im.onerror = () => { im.failed = true; coversArrived(); };
     im.src = url; images.set(url, im);
   }
   const im = images.get(url); return im.complete && im.naturalWidth ? im : null;
@@ -218,6 +223,16 @@ function viewGroove(W, H, t) {
   for (const n of L.nodes) hits.push({ cx: cx + n.x * c - n.y * s, cy: cy + n.x * s + n.y * c, r: n.r, tip: albumTip(n.a, `<br>centred on ${n.a.tmean.slice(0, 7)}`) });
 }
 
+// The smallest square, facing the slice's middle, that covers the whole slice (rIn..rOut, ±halfAngle):
+// a thin slice shows a strip of its cover, a single-album record the cover once across the disc.
+// Sizing by the width at mid-radius instead blew a lone album's cover up ~7x and left wide slices' corners bare.
+function coverPlacement(rIn, rOut, halfAngle) {
+  const phi = Math.min(Math.PI, halfAngle), uMax = rOut;
+  const uMin = phi <= Math.PI / 2 ? rIn * Math.cos(phi) : rOut * Math.cos(phi);
+  const vMax = rOut * Math.sin(Math.min(phi, Math.PI / 2));
+  return { size: Math.max(uMax - uMin, 2 * vMax) * 1.04, dist: (uMax + uMin) / 2 };
+}
+
 // ---------- Records: one picture-disc per year, all slowly turning ----------
 const recordYears = () => Object.keys(STATS.year_tops).filter(y => (STATS.year_totals[y] || 0) > 5 * H_MS).sort();
 function vinylArt(R, slices, labelUrl) {  // drawn at (R, R); the reflection is added live, on top
@@ -227,7 +242,7 @@ function vinylArt(R, slices, labelUrl) {  // drawn at (R, R); the reflection is 
   for (const s of slices) {
     const a0 = -Math.PI / 2 + TAU * acc / total, a1 = a0 + TAU * s.ms / total, am = (a0 + a1) / 2; acc += s.ms;
     ctx.save(); ctx.beginPath(); ctx.arc(R, R, rArt, a0, a1); ctx.arc(R, R, rWax, a1, a0, true); ctx.closePath(); ctx.clip();
-    const rm = (rArt + rWax) / 2; slicedCover(s.img, R, R, rm, am, Math.max(rArt - rWax, rm * (a1 - a0)) * 1.12);
+    const fit = coverPlacement(rWax, rArt, (a1 - a0) / 2); slicedCover(s.img, R, R, fit.dist, am, fit.size);
     ctx.restore();
     ctx.strokeStyle = "rgba(6,6,8,.85)"; ctx.lineWidth = Math.max(0.6, R * 0.004);
     ctx.beginPath(); ctx.moveTo(R + rWax * Math.cos(a0), R + rWax * Math.sin(a0)); ctx.lineTo(R + rArt * Math.cos(a0), R + rArt * Math.sin(a0)); ctx.stroke();
@@ -325,10 +340,345 @@ function viewSleeve(W, H, t) {
   });
 }
 
+// ---------- Diary: one record per day, a month at a time; click a day for its record ----------
+const TZ = "Europe/Paris";
+let diaryIndex = null, liveToday = null, diaryMonth = null, diaryDay = null;  // "YYYY-MM", "YYYY-MM-DD"
+const diaryYears = new Map();
+const pad = n => String(n).padStart(2, "0");
+const localDate = d => new Intl.DateTimeFormat("en-CA", { timeZone: TZ, year: "numeric", month: "2-digit", day: "2-digit" }).format(d);
+const todayKey = () => localDate(new Date());
+const dayTitle = (day, long) => new Intl.DateTimeFormat("en-GB", { weekday: long ? "long" : "short", day: "numeric", month: long ? "long" : "short", year: long ? "numeric" : undefined, timeZone: "UTC" }).format(Date.parse(day + "T12:00:00Z"));
+const monthTitle = ym => new Intl.DateTimeFormat("en-GB", { month: "long", year: "numeric", timeZone: "UTC" }).format(Date.parse(ym + "-15T12:00:00Z"));
+
+async function getJSON(url) {
+  const r = await fetch(url, { cache: "no-cache" });
+  if (!r.ok) throw new Error(`${url}: ${r.status}`);
+  return r.json();
+}
+async function loadDiaryIndex() {
+  try { diaryIndex = await getJSON("/data/diary/index.json"); } catch (e) { console.warn("diary unavailable", e); }
+  requestDraw();
+}
+function diaryYear(y) {  // loads on first use; null until it has arrived
+  if (!diaryYears.has(y)) {
+    diaryYears.set(y, null);
+    getJSON(`/data/diary/${y}.json`).then(d => { diaryYears.set(y, d); requestDraw(); }).catch(e => console.warn(e));
+  }
+  return diaryYears.get(y);
+}
+// today comes from the live data; the diary files are rebuilt overnight
+async function loadLiveToday() {
+  try {
+    const d = await getJSON("/data/day.json"), today = todayKey(), byAlbum = new Map();
+    for (const p of d.plays) {
+      if (localDate(new Date(p.t1)) !== today) continue;
+      const a = byAlbum.get(p.album) || { name: p.album_name, artist: p.artist, img: p.img, sec: 0 };
+      a.sec += (Date.parse(p.t1) - Date.parse(p.t0)) / 1000;
+      byAlbum.set(p.album, a);
+    }
+    liveToday = { day: today, albums: [...byAlbum.values()].sort((a, b) => b.sec - a.sec) };
+    for (const k of daySprites.keys()) if (k.startsWith(today)) daySprites.delete(k);
+    requestDraw();
+  } catch (e) { console.warn("live data unavailable", e); }
+}
+/** A day's albums, most played first: [] for a day without listening, null while its year loads. */
+function dayAlbums(day) {
+  if (liveToday && day === liveToday.day) return liveToday.albums;
+  const data = diaryYear(+day.slice(0, 4));
+  if (!data) return null;
+  return (data.days[day] || []).map(([i, sec]) => { const [name, artist, img] = data.albums[i]; return { name, artist, img, sec }; });
+}
+const dayHours = albums => albums.reduce((a, x) => a + x.sec, 0) * 1000;
+
+// colours around the wheel, measured from the covers exactly as on the live record
+function measureColor(img) {
+  const n = 32, c = document.createElement("canvas");
+  c.width = c.height = n;
+  const g = c.getContext("2d", { willReadFrequently: true });
+  g.drawImage(img, 0, 0, n, n);
+  const px = g.getImageData(0, 0, n, n).data, bins = new Array(24).fill(0), binLight = new Array(24).fill(0);
+  let chromaSum = 0, lightSum = 0;
+  for (let i = 0; i < px.length; i += 4) {
+    const r = px[i] / 255, gr = px[i + 1] / 255, b = px[i + 2] / 255;
+    const mx = Math.max(r, gr, b), mn = Math.min(r, gr, b), l = (mx + mn) / 2, d = mx - mn;
+    lightSum += l;
+    if (!d) continue;
+    const chroma = d / (1 - Math.abs(2 * l - 1)) * (1 - Math.abs(2 * l - 1));
+    if (chroma < 0.12) continue;
+    const h = (mx === r ? ((gr - b) / d + 6) % 6 : mx === gr ? (b - r) / d + 2 : (r - gr) / d + 4) * 60;
+    const k = Math.floor(h / 15) % 24;
+    bins[k] += chroma; binLight[k] += chroma * l; chromaSum += chroma;
+  }
+  const count = px.length / 4;
+  if (chromaSum / count < 0.06) return { neutral: true, light: lightSum / count };
+  let best = 0;
+  for (let k = 1; k < 24; k++) if (bins[k] > bins[best]) best = k;
+  let x = 0, y = 0, w = 0, lw = 0;
+  for (const k of [best - 1, best, best + 1]) {
+    const j = (k + 24) % 24, a = (j + 0.5) * 15 * Math.PI / 180;
+    x += Math.cos(a) * bins[j]; y += Math.sin(a) * bins[j]; w += bins[j]; lw += binLight[j];
+  }
+  return { neutral: false, hue: (Math.atan2(y, x) * 180 / Math.PI + 360) % 360, light: lw / w };
+}
+const NO_COVER = { neutral: true, light: 0 };  // no cover, or it failed: a dark slice among the neutrals
+const wheelKey = c => c.neutral ? 400 + c.light : (c.hue + 20) % 360;
+const coverColor = new Map();
+function coverState(url) {
+  image(url);
+  const im = images.get(url);
+  return im.failed ? "failed" : im.complete && im.naturalWidth ? "ready" : "loading";
+}
+function colorOf(url) {  // null while the cover is still on its way
+  if (!url) return NO_COVER;
+  if (coverColor.has(url)) return coverColor.get(url);
+  const small = url.replace(VARIANT_RE, VARIANTS[0][1]), state = coverState(small);
+  if (state === "loading") return null;
+  let c = NO_COVER;
+  if (state === "ready") try { c = measureColor(images.get(small)); } catch { }
+  coverColor.set(url, c);
+  return c;
+}
+
+// every slice edge waves, its rhythm and strength drifting smoothly around the disc (the live record's shape)
+function organicOffset(d, a) {
+  const n = (k1, p1, k2, p2) => 0.5 + 0.3 * Math.sin(k1 * a + p1) + 0.2 * Math.sin(k2 * a + p2);
+  const freq = 2.0 + 1.6 * n(1, 0.3, 3, 2.1), phase = TAU * n(2, 1.7, 1, 4.2), amp = 0.03 + 0.033 * n(3, 0.9, 2, 5.5);
+  return amp * (Math.sin(d * Math.PI * freq + phase) + 0.35 * Math.sin(d * Math.PI * 5.3 + 2 * phase)) * Math.min(1, d * 4);
+}
+function dayRecord(R, slices, labelUrl) {  // drawn at (R, R)
+  const rArt = R * 0.97, rWax = R * 0.31, rLabel = R * 0.3, span = rArt - rWax, total = slices.reduce((a, x) => a + x.sec, 0) || 1;
+  ctx.fillStyle = "#0a0a0c"; ctx.beginPath(); ctx.arc(R, R, R * 0.985, 0, TAU); ctx.fill();
+  let acc = 0;
+  for (const s of slices) {
+    const a0 = -Math.PI / 2 + TAU * acc / total, a1 = a0 + TAU * s.sec / total;
+    acc += s.sec;
+    const angle = (u, d) => { const base = a0 + u * (a1 - a0); return base + organicOffset(d, base); };
+    const at = (u, d) => { const a = angle(u, d), r = rWax + span * d; return [R + r * Math.cos(a), R + r * Math.sin(a)]; };
+    const nU = Math.max(6, Math.ceil((a1 - a0) * 50)), nD = R > 120 ? 40 : 16;
+    ctx.save(); ctx.beginPath();
+    for (let i = 0; i <= nU; i++) ctx.lineTo(...at(i / nU, 0));
+    for (let i = 0; i <= nD; i++) ctx.lineTo(...at(1, i / nD));
+    for (let i = nU; i >= 0; i--) ctx.lineTo(...at(i / nU, 1));
+    for (let i = nD; i >= 0; i--) ctx.lineTo(...at(0, i / nD));
+    ctx.closePath(); ctx.clip();
+    const fit = coverPlacement(rWax, rArt, (a1 - a0) / 2 + 0.07);
+    if (s.img) slicedCover(s.img, R, R, fit.dist, angle(0.5, 0.5), fit.size);
+    ctx.restore();
+    if (slices.length > 1) {
+      ctx.beginPath(); for (let i = 0; i <= nD; i++) ctx.lineTo(...at(0, i / nD));
+      ctx.strokeStyle = "rgba(6,6,8,.85)"; ctx.lineWidth = Math.max(0.5, R * 0.0036); ctx.stroke();
+    }
+  }
+  const shade = ctx.createRadialGradient(R, R, rWax, R, R, rArt);  // the art sits in the vinyl
+  shade.addColorStop(0, "rgba(0,0,0,.35)"); shade.addColorStop(0.12, "rgba(0,0,0,0)"); shade.addColorStop(0.9, "rgba(0,0,0,0)"); shade.addColorStop(1, "rgba(0,0,0,.45)");
+  ctx.fillStyle = shade; ctx.beginPath(); ctx.arc(R, R, rArt, 0, TAU); ctx.arc(R, R, rWax, 0, TAU, true); ctx.fill();
+  ctx.strokeStyle = "rgba(0,0,0,.16)"; ctx.lineWidth = 0.7;  // grooves
+  for (let r = R * 0.43; r < R; r += Math.max(2, R / 70)) { ctx.beginPath(); ctx.arc(R, R, r, 0, TAU); ctx.stroke(); }
+  ctx.save(); ctx.beginPath(); ctx.arc(R, R, rLabel, 0, TAU); ctx.clip();
+  ctx.fillStyle = "#15151a"; ctx.fillRect(R - rLabel, R - rLabel, 2 * rLabel, 2 * rLabel);
+  if (labelUrl) coverFit(labelUrl, R - rLabel, R - rLabel, 2 * rLabel, 2 * rLabel);
+  ctx.restore();
+  ctx.fillStyle = BG; ctx.beginPath(); ctx.arc(R, R, R * 0.025, 0, TAU); ctx.fill();
+}
+// A day's record is drawn once its covers have settled (arrived or failed), so it never reshuffles while
+// loading; past 6 s, slow covers count as missing. Cached per size.
+const daySprites = new Map(), dayAsked = new Map();
+function daySprite(day, R) {
+  const px = Math.round(2 * R * (devicePixelRatio || 1)), key = `${day}|${px}`, now = performance.now();
+  const hit = daySprites.get(key);
+  if (hit && (hit.settled || now - hit.at < 400)) return hit.canvas;
+  const albums = dayAlbums(day);
+  if (!albums || !albums.length) return null;
+  if (!dayAsked.has(day)) dayAsked.set(day, now);
+  const late = now - dayAsked.get(day) > 6000;
+  const colors = albums.map(a => colorOf(a.img) || (late ? NO_COVER : null));
+  if (colors.includes(null)) return hit ? hit.canvas : null;
+  const slices = albums.map((a, i) => ({ ...a, key: wheelKey(colors[i]) })).sort((a, b) => a.key - b.key);
+  // a big record also waits for its sharper covers before it's kept for good
+  const total = albums.reduce((t, a) => t + a.sec, 0) || 1;
+  const settled = albums.every(a => !a.img || coverState(a.img.replace(VARIANT_RE, variantFor(Math.max(R * 0.8,
+    coverPlacement(R * 0.31, R * 0.97, Math.PI * a.sec / total + 0.07).size)))) !== "loading");
+  const canvas = offscreen(2 * R, 2 * R, () => dayRecord(R, slices, albums[0].img));
+  daySprites.set(key, { canvas, settled, at: now });
+  return canvas;
+}
+
+function monthLayout(ym) {
+  const [y, m] = ym.split("-").map(Number), n = new Date(Date.UTC(y, m, 0)).getUTCDate();
+  const first = (new Date(Date.UTC(y, m - 1, 1)).getUTCDay() + 6) % 7;  // Monday first
+  return { y, m, n, first, rows: Math.ceil((first + n) / 7) };
+}
+function viewDiary(W, H, t) {
+  if (!diaryIndex) { label("Loading the diary…", W / 2, H / 2, { align: "center" }); return; }
+  if (diaryDay) return viewDiaryDay(W, H, t);
+  const ym = diaryMonth || todayKey().slice(0, 7), today = todayKey();
+  const { y, m, n, first, rows } = monthLayout(ym);
+  const top = 100, bottom = 80, side = 24;
+  const cell = Math.min((W - 2 * side) / 7, (H - top - bottom) / rows), R = cell * 0.42;
+  const ox = (W - 7 * cell) / 2, oy = top + (H - top - bottom - rows * cell) / 2;
+  let monthMs = 0, loading = false;
+  ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].forEach((d, i) => label(d, ox + (i + 0.5) * cell, oy - 14, { align: "center", size: 11, color: "rgba(255,255,255,.35)" }));
+  for (let d = 1; d <= n; d++) {
+    const day = `${y}-${pad(m)}-${pad(d)}`, i = first + d - 1;
+    const cx = ox + (i % 7 + 0.5) * cell, cy = oy + (Math.floor(i / 7) + 0.5) * cell;
+    const isToday = day === today;
+    label(String(d), cx - cell * 0.46, cy - cell * 0.44, { size: 11, color: isToday ? "#fff" : "rgba(255,255,255,.35)", weight: isToday ? 600 : 400 });
+    if (day > today) continue;
+    const albums = dayAlbums(day);
+    if (!albums) { loading = true; continue; }
+    if (!albums.length) {  // a day without listening
+      ctx.strokeStyle = "rgba(255,255,255,.06)"; ctx.lineWidth = 1; ctx.beginPath(); ctx.arc(cx, cy, R * 0.9, 0, TAU); ctx.stroke();
+      continue;
+    }
+    const ms = dayHours(albums);
+    monthMs += ms;
+    const sprite = daySprite(day, R);
+    if (sprite) {
+      const angle = motion ? t * TAU / 120 + d * 0.7 : 0;  // one turn every two minutes
+      ctx.save(); ctx.translate(cx, cy); ctx.rotate(angle); ctx.drawImage(sprite, -R, -R, 2 * R, 2 * R); ctx.restore();
+      sheen(cx, cy, R);
+    } else {
+      ctx.fillStyle = "#141418"; ctx.beginPath(); ctx.arc(cx, cy, R, 0, TAU); ctx.fill();
+    }
+    if (isToday) { ctx.strokeStyle = "rgba(255,255,255,.55)"; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.arc(cx, cy, R + 4, 0, TAU); ctx.stroke(); }
+    hits.push({ cx, cy, r: R, open: day, tip: `<b>${esc(dayTitle(day))}</b> · ${hours(ms)}${isToday ? " so far" : ""}<br>${esc(albums[0].name)} — ${esc(albums[0].artist)}<br><small>${albums.length} album${albums.length > 1 ? "s" : ""} · click to open</small>` });
+  }
+  label(monthTitle(ym), W / 2, 40, { align: "center", size: 22, color: "#f2f2f2", weight: 600 });
+  label(loading ? "loading…" : monthMs ? `${hours(monthMs)} of listening` : "no listening", W / 2, 66, { align: "center", size: 12 });
+}
+
+function viewDiaryDay(W, H, t) {
+  const day = diaryDay, albums = dayAlbums(day), isToday = day === todayKey();
+  label(dayTitle(day, true), W / 2, 40, { align: "center", size: 22, color: "#f2f2f2", weight: 600 });
+  if (!albums) { label("loading…", W / 2, 66, { align: "center", size: 12 }); return; }
+  if (!albums.length) { label("no listening this day", W / 2, 66, { align: "center", size: 12 }); return; }
+  label(`${hours(dayHours(albums))}${isToday ? " so far" : ""} · ${albums.length} album${albums.length > 1 ? "s" : ""}`, W / 2, 66, { align: "center", size: 12 });
+  // the record, with the top albums beside it on a wide screen and below it on a tall one
+  const wide = W > H * 1.15, listN = Math.min(8, albums.length);
+  const R = wide ? Math.min(W * 0.3, (H - 190) / 2) : Math.min(W * 0.42, (H - 190 - listN * 34) / 2);
+  const listW = Math.min(W * 0.3, 380), groupW = 2 * R + 40 + listW;  // wide: record and list centred together
+  const cx = wide ? (W - groupW) / 2 + R : W / 2, cy = wide ? 100 + (H - 190) / 2 : 100 + R;
+  const sprite = daySprite(day, R), angle = motion ? t * TAU / 60 : 0;
+  if (sprite && !showFlow(sprite, cx, cy, R, t, angle)) {  // without WebGL: the record just turns
+    ctx.save(); ctx.translate(cx, cy); ctx.rotate(angle); ctx.drawImage(sprite, -R, -R, 2 * R, 2 * R); ctx.restore();
+    sheen(cx, cy, R);
+  } else if (!sprite) { ctx.fillStyle = "#141418"; ctx.beginPath(); ctx.arc(cx, cy, R, 0, TAU); ctx.fill(); }
+  const lw = wide ? listW : Math.min(W * 0.84, 520), lx = wide ? cx + R + 40 : (W - lw) / 2, ly = wide ? cy - listN * 17 : cy + R + 30;
+  albums.slice(0, listN).forEach((a, i) => {
+    const y = ly + i * 34;
+    if (a.img) coverFit(a.img, lx, y, 28, 28); else { ctx.fillStyle = "#1b1b20"; ctx.fillRect(lx, y, 28, 28); }
+    const name = a.name.length > 42 ? a.name.slice(0, 40) + "…" : a.name;
+    label(name, lx + 38, y + 8, { size: 12, color: "#f2f2f2", weight: 600 });
+    label(a.artist, lx + 38, y + 22, { size: 11, color: "rgba(255,255,255,.5)" });
+    label(hours(a.sec * 1000), lx + lw, y + 8, { size: 12, color: "rgba(255,255,255,.7)", align: "right" });
+  });
+}
+
+// the day's record, marbled on the GPU like the live one, with the fixed reflection
+const flowCanvas = document.createElement("canvas");
+Object.assign(flowCanvas.style, { position: "fixed", pointerEvents: "none", borderRadius: "50%" });
+flowCanvas.hidden = true;
+canvas.after(flowCanvas);
+let gl = null, glFailed = false, glSprite = null, uTime, uRot, flowShown = false;
+function setupFlow() {
+  gl = flowCanvas.getContext("webgl", { premultipliedAlpha: false });
+  if (!gl) return false;
+  const shader = (type, src) => { const sh = gl.createShader(type); gl.shaderSource(sh, src); gl.compileShader(sh); return sh; };
+  const prog = gl.createProgram();
+  gl.attachShader(prog, shader(gl.VERTEX_SHADER, "attribute vec2 p; varying vec2 v; void main() { v = p; gl_Position = vec4(p, 0, 1); }"));
+  gl.attachShader(prog, shader(gl.FRAGMENT_SHADER, `
+    precision highp float;
+    varying vec2 v; uniform sampler2D tex; uniform float t; uniform float rot;
+    float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+    float noise(vec2 p) { vec2 i = floor(p), f = fract(p), u = f * f * (3. - 2. * f);
+      return mix(mix(hash(i), hash(i + vec2(1, 0)), u.x), mix(hash(i + vec2(0, 1)), hash(i + vec2(1, 1)), u.x), u.y); }
+    float fbm(vec2 p) { float s = 0., a = .5; for (int k = 0; k < 4; k++) { s += a * noise(p); p *= 2.03; a *= .5; } return s; }
+    void main() {
+      if (length(v) > 1.) { gl_FragColor = vec4(0.); return; }
+      float c = cos(rot), s = sin(rot);
+      vec2 p = vec2(c * v.x - s * v.y, s * v.x + c * v.y);  // into the record's own frame: it turns clockwise
+      float r = length(p), a = atan(p.y, p.x);
+      float w = smoothstep(.31, .42, r) * (1. - smoothstep(.93, .975, r));  // the label and the rim stay still
+      vec2 q = p * 2. + vec2(t * .02, -t * .015);
+      a += w * .14 * (fbm(q) - .5);
+      r += w * .012 * (fbm(q * 1.3 + 7.) - .5);
+      vec4 col = texture2D(tex, vec2(cos(a), sin(a)) * r * .5 + .5);
+      float g = degrees(atan(v.x, v.y)); if (g < 0.) g += 360.;  // the reflection stays put on screen
+      float h = (.26 * max(0., 1. - abs(g - 30.) / 31.) + .2 * max(0., 1. - abs(g - 210.) / 31.)) * step(.27, length(v));
+      col.rgb = 1. - (1. - col.rgb) * (1. - h);
+      gl_FragColor = col;
+    }`));
+  gl.linkProgram(prog);
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) { gl = null; return false; }
+  gl.useProgram(prog);
+  gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
+  const loc = gl.getAttribLocation(prog, "p"); gl.enableVertexAttribArray(loc); gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+  gl.bindTexture(gl.TEXTURE_2D, gl.createTexture());
+  for (const [k, val] of [[gl.TEXTURE_MIN_FILTER, gl.LINEAR], [gl.TEXTURE_MAG_FILTER, gl.LINEAR], [gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE], [gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE]])
+    gl.texParameteri(gl.TEXTURE_2D, k, val);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+  uTime = gl.getUniformLocation(prog, "t"); uRot = gl.getUniformLocation(prog, "rot");
+  return true;
+}
+function showFlow(sprite, cx, cy, R, t, angle) {
+  if (glFailed || (!gl && !setupFlow())) { glFailed = true; return false; }
+  if (flowCanvas.width !== sprite.width) { flowCanvas.width = flowCanvas.height = sprite.width; gl.viewport(0, 0, sprite.width, sprite.width); }
+  try {
+    if (glSprite !== sprite) { gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, sprite); glSprite = sprite; }
+  } catch (e) { console.warn("flow unavailable", e); glFailed = true; return false; }
+  Object.assign(flowCanvas.style, { left: cx - R + "px", top: cy - R + "px", width: 2 * R + "px", height: 2 * R + "px" });
+  flowCanvas.hidden = false; flowShown = true;
+  gl.uniform1f(uTime, motion ? t : 0); gl.uniform1f(uRot, angle);
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  return true;
+}
+
+// moving through months and days: arrows in the menu, arrow keys, swipes; Esc goes back to the month
+function diaryBounds() {
+  const years = Object.keys(diaryIndex?.years || {}).sort();
+  return { firstDay: years.length ? diaryIndex.years[years[0]].first : todayKey(), today: todayKey() };
+}
+function diaryStep(dir) {
+  if (current !== "Diary" || !diaryIndex) return;
+  const { firstDay, today } = diaryBounds();
+  if (diaryDay) {
+    const next = new Date(Date.parse(diaryDay + "T12:00:00Z") + dir * 864e5).toISOString().slice(0, 10);
+    if (next >= firstDay && next <= today) location.hash = `Diary/${next}`;
+  } else {
+    const [y, m] = (diaryMonth || today.slice(0, 7)).split("-").map(Number), d = new Date(Date.UTC(y, m - 1 + dir, 1));
+    const next = `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}`;
+    if (next >= firstDay.slice(0, 7) && next <= today.slice(0, 7)) location.hash = `Diary/${next}`;
+  }
+}
+addEventListener("keydown", e => {
+  if (current !== "Diary") return;
+  if (e.key === "ArrowLeft") diaryStep(-1);
+  if (e.key === "ArrowRight") diaryStep(1);
+  if (e.key === "Escape" && diaryDay) location.hash = `Diary/${diaryDay.slice(0, 7)}`;
+});
+let swipeX = null, swiped = false;
+canvas.addEventListener("pointerdown", e => { swipeX = e.clientX; swiped = false; });
+canvas.addEventListener("pointerup", e => {
+  if (swipeX != null && Math.abs(e.clientX - swipeX) > 60) { swiped = true; diaryStep(e.clientX < swipeX ? 1 : -1); }
+  swipeX = null;
+});
+canvas.addEventListener("click", e => {
+  if (swiped) { swiped = false; return; }  // the end of a swipe isn't a click on the record under it
+  const h = hitTest(e.clientX, e.clientY);
+  if (h?.open) location.hash = `Diary/${h.open}`;
+});
+
 // ---------- shell ----------
-const views = { Eras: viewEras, Groove: viewGroove, Records: viewRecords, "|": null, Spiral: viewSpiral, Sleeve: viewSleeve };
+const views = { Eras: viewEras, Groove: viewGroove, Records: viewRecords, Diary: viewDiary, "|": null, Spiral: viewSpiral, Sleeve: viewSleeve };
 const periodViews = new Set(["Spiral", "Sleeve"]);
-const fromHash = () => { const h = decodeURIComponent(location.hash.slice(1)); return views[h] ? h : "Eras"; };
+// #Eras, #Diary, #Diary/2026-10 (a month), #Diary/2026-10-17 (a day)
+function fromHash() {
+  const [name, when = ""] = decodeURIComponent(location.hash.slice(1)).split("/");
+  diaryMonth = /^\d{4}-\d{2}$/.test(when) ? when : /^\d{4}-\d{2}-\d{2}$/.test(when) ? when.slice(0, 7) : null;
+  diaryDay = /^\d{4}-\d{2}-\d{2}$/.test(when) ? when : null;
+  return views[name] ? name : "Eras";
+}
 let current = fromHash();
 const nav = document.getElementById("nav"), sel = document.createElement("select");
 nav.insertAdjacentHTML("beforeend", `<a href="/" title="Back to the live record">Now</a><span class="sep"></span>`);
@@ -340,19 +690,34 @@ for (const name of Object.keys(views)) {
 }
 sel.onchange = () => { period = sel.value; requestDraw(); };
 nav.append(sel);
-addEventListener("hashchange", () => { current = fromHash(); tip.hidden = true; requestDraw(); });
+const diaryNav = document.createElement("span");
+diaryNav.style.display = "contents";
+diaryNav.innerHTML = `<span class="sep"></span><button data-step="-1" title="Earlier (←)">‹</button><button data-up title="Back to the month (Esc)"></button><button data-step="1" title="Later (→)">›</button>`;
+diaryNav.querySelectorAll("[data-step]").forEach(b => b.onclick = () => diaryStep(+b.dataset.step));
+diaryNav.querySelector("[data-up]").onclick = () => { if (diaryDay) location.hash = `Diary/${diaryDay.slice(0, 7)}`; };
+nav.append(diaryNav);
+function updateNav() {  // the menu follows the address, whether or not a frame gets drawn
+  nav.querySelectorAll("button").forEach(b => b.classList.toggle("on", b.textContent === current));
+  sel.hidden = !periodViews.has(current);
+  diaryNav.style.display = current === "Diary" ? "contents" : "none";
+  const up = diaryNav.querySelector("[data-up]"), upText = monthTitle((diaryDay || diaryMonth || todayKey()).slice(0, 7));
+  if (up.textContent !== upText) up.textContent = upText;
+}
+addEventListener("hashchange", () => { current = fromHash(); tip.hidden = true; updateNav(); requestDraw(); });
+updateNav();
 
 let mouse = null;
 function draw(t) {
   const dpr = devicePixelRatio || 1, W = innerWidth, H = innerHeight;
   if (canvas.width !== Math.round(W * dpr) || canvas.height !== Math.round(H * dpr)) {
-    canvas.width = Math.round(W * dpr); canvas.height = Math.round(H * dpr); layouts.clear(); renders.clear();
+    canvas.width = Math.round(W * dpr); canvas.height = Math.round(H * dpr); layouts.clear(); renders.clear(); daySprites.clear();
   }
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.fillStyle = BG; ctx.fillRect(0, 0, W, H);
   hits = [];
-  if (STATS && W > 200 && H > 200) views[current](W, H, t);
-  nav.querySelectorAll("button").forEach(b => b.classList.toggle("on", b.textContent === current));
-  sel.hidden = !periodViews.has(current);
+  flowShown = false;
+  if ((STATS || current === "Diary") && W > 200 && H > 200) views[current](W, H, t);
+  if (!flowShown) flowCanvas.hidden = true;
+  updateNav();
   if (mouse) showTip();
 }
 function hitTest(x, y) {
@@ -399,5 +764,8 @@ function frame(now) { draw(now / 1000); requestAnimationFrame(frame); }
 addEventListener("resize", requestDraw);
 loadStats();
 setInterval(loadStats, 3600e3);  // the stats are rebuilt daily
+loadDiaryIndex();
+loadLiveToday();
+setInterval(() => { if (current === "Diary") loadLiveToday(); }, 60e3);  // today's record keeps growing
 motion ? requestAnimationFrame(frame) : requestDraw();
 </script>

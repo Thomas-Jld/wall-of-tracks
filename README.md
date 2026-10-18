@@ -8,7 +8,9 @@ Artworks made from the album covers of what I listen to on Spotify.
   spins while music plays. Double click to switch between the organic (wavy, flowing) and the classic
   record.
 - **Past listening** — https://walloftrack.thomasjuldo.com/past/: the whole listening history since 2014
-  as Eras, Groove and Records, and the top 10 (all time or per year) as Spiral and Sleeve.
+  as Eras, Groove and Records, the top 10 (all time or per year) as Spiral and Sleeve, and Diary: a record
+  for every day, a month at a time (`/past/#Diary/2026-10`), each day opening into its own record
+  (`/past/#Diary/2026-10-17`).
 - **Android live wallpaper** — the live record on the phone's home and lock screens.
 
 ## How it fits together
@@ -38,6 +40,7 @@ JSON for the pages, which draw everything themselves in the browser (or on the p
 | `tracker/auth.py` | One-time Spotify login that stores the refresh token |
 | `tracker/import_history.py`, `tracker/enrich.py` | Import a Spotify history export, then fetch covers and ids for its tracks |
 | `tracker/stats.py` | Builds `stats.json` for the past-listening page |
+| `tracker/diary.py` | Builds `diary/<year>.json`: each day's albums and listening, for Diary |
 | `tracker/web/` | The live record (`index.html`) and the past-listening page (`past/`) |
 | `tracker/*.service`, `*.timer`, `nginx-walloftrack.conf` | systemd units and the nginx site |
 | `android/` | The live wallpaper app |
@@ -110,7 +113,7 @@ Request the *Extended streaming history* from Spotify's privacy settings. Once i
 ```
 
 Both are safe to re-run with a newer export: plays already there are kept once, and the export's rows
-replace the matching live ones. `stats.py` picks the new history up on its next run (daily at 04:00 UTC).
+replace the matching live ones. `stats.py` and `diary.py` pick the new history up on their next run (daily at 04:00 UTC).
 
 ## The Android wallpaper
 

@@ -60,6 +60,7 @@
   <a href="/past/#Eras">Eras</a>
   <a href="/past/#Groove">Groove</a>
   <a href="/past/#Records">Records</a>
+  <a href="/past/#Diary">Diary</a>
   <a href="/past/#Spiral">Top 10 · Spiral</a>
   <a href="/past/#Sleeve">Top 10 · Sleeve</a>
 </nav>
@@ -276,6 +277,16 @@ const SHAPES = {
 let style = "flow";  // "flow" (organic + flow) | "classic"
 try { style = localStorage.getItem("wot-style") || "flow"; } catch {}
 
+// The smallest square, facing the slice's middle, that covers the whole slice (rIn..rOut, ±halfAngle):
+// a thin slice shows a strip of its cover, a single-album record the cover once across the disc.
+// Sizing by the width at mid-radius instead blew a lone album's cover up ~7x and left wide slices' corners bare.
+function coverPlacement(rIn, rOut, halfAngle) {
+  const phi = Math.min(Math.PI, halfAngle), uMax = rOut;
+  const uMin = phi <= Math.PI / 2 ? rIn * Math.cos(phi) : rOut * Math.cos(phi);
+  const vMax = rOut * Math.sin(Math.min(phi, Math.PI / 2));
+  return { size: Math.max(uMax - uMin, 2 * vMax) * 1.04, dist: (uMax + uMin) / 2 };
+}
+
 // ---------- drawing ----------
 let redrawQueued = false;
 function redraw() {
@@ -318,8 +329,9 @@ function drawDisc() {
     for (let i = nD; i >= 0; i--) ctx.lineTo(...at(0, i / nD));
     ctx.closePath(); ctx.clip();
     // cover printed with its top facing outward, centred on the slice
-    const am = angle(0.5, 0.5), rm = rWax + span / 2, s = Math.max(span, rm * (a1 - a0)) * 1.15, im = image(run.img);
-    if (im) { ctx.save(); ctx.translate(R, R); ctx.rotate(am + Math.PI / 2); ctx.drawImage(im, -s / 2, -rm - s / 2, s, s); ctx.restore(); }
+    // wavy edges reach ~0.07 rad past the slice's nominal ones
+    const am = angle(0.5, 0.5), { size: s, dist } = coverPlacement(rWax, rArt, (a1 - a0) / 2 + (shape === SHAPES.organic ? 0.07 : 0)), im = image(run.img);
+    if (im) { ctx.save(); ctx.translate(R, R); ctx.rotate(am + Math.PI / 2); ctx.drawImage(im, -s / 2, -dist - s / 2, s, s); ctx.restore(); }
 
     ctx.restore();
     if (rs.length > 1) {
