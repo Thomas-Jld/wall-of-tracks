@@ -259,8 +259,12 @@ final class Record {
             c.save();
             c.clipPath(outline);
             // the cover is printed with its top facing outward, centred on the slice
+            // the smallest square facing the slice's middle that covers all of it (wavy edges reach ~0.07 rad further)
             double am = angle(a0, a1, 0.5, 0.5, organic);
-            float rm = rWax + span / 2, s = (float) Math.max(span, rm * (a1 - a0)) * 1.15f;
+            double phi = Math.min(Math.PI, (a1 - a0) / 2 + (organic ? 0.07 : 0));
+            double uMin = phi <= Math.PI / 2 ? rWax * Math.cos(phi) : rArt * Math.cos(phi);
+            double vMax = rArt * Math.sin(Math.min(phi, Math.PI / 2));
+            float s = (float) (Math.max(rArt - uMin, 2 * vMax) * 1.04), rm = (float) ((rArt + uMin) / 2);
             Bitmap im = covers.get(Covers.medium(run.img));
             if (im != null) {
                 c.save();
