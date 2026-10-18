@@ -1,6 +1,11 @@
 package com.thomasjuldo.walloftracks;
 
 import android.app.WallpaperManager;
+import android.content.BroadcastReceiver;
+import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
+import android.database.ContentObserver;
 import android.content.SharedPreferences;
 import android.graphics.Bitmap;
 import android.graphics.BitmapShader;
@@ -73,6 +78,14 @@ public final class RecordWallpaper extends WallpaperService {
         private final Handler main = new Handler(Looper.getMainLooper());
         private final Choreographer.FrameCallback vsync = this::onVsync;
         private final Runnable wake = this::requestFrame;
+        // battery saver and "remove animations" can change while the wallpaper is on screen (plugging in at
+        // low battery turns battery saver off): pick that up at once, not at the next visibility change
+        private final BroadcastReceiver powerSave = new BroadcastReceiver() {
+            @Override public void onReceive(Context context, Intent intent) { motionChanged(); }
+        };
+        private final ContentObserver animatorScale = new ContentObserver(main) {
+            @Override public void onChange(boolean selfChange) { motionChanged(); }
+        };
         // the record is rebuilt from its covers here, so that work never delays a frame
         private HandlerThread renderThread;
         private Handler renderer;
@@ -125,6 +138,10 @@ public final class RecordWallpaper extends WallpaperService {
             renderThread.start();
             renderer = new Handler(renderThread.getLooper());
             feed = new LiveFeed(this);
+            registerReceiver(powerSave, new IntentFilter(PowerManager.ACTION_POWER_SAVE_MODE_CHANGED), null, main,
+                    Context.RECEIVER_NOT_EXPORTED);
+            getContentResolver().registerContentObserver(
+                    Settings.Global.getUriFor(Settings.Global.ANIMATOR_DURATION_SCALE), false, animatorScale);
             try {
                 flow = new RuntimeShader(FLOW);
                 flowPaint.setShader(flow);
@@ -186,6 +203,8 @@ public final class RecordWallpaper extends WallpaperService {
         }
 
         @Override public void onDestroy() {
+            unregisterReceiver(powerSave);
+            getContentResolver().unregisterContentObserver(animatorScale);
             feed.shutdown();
             covers.shutdown();
             stopFrames();
@@ -246,6 +265,11 @@ public final class RecordWallpaper extends WallpaperService {
             Choreographer.getInstance().removeFrameCallback(vsync);
             main.removeCallbacks(wake);
             frameQueued = false;
+        }
+
+        private void motionChanged() {
+            motion = motionAllowed();
+            requestFrame();
         }
 
         private boolean motionAllowed() {  // honour "remove animations" and battery saver
