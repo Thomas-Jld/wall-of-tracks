@@ -186,7 +186,7 @@ public final class RecordWallpaper extends WallpaperService {
         @Override public void onVisibilityChanged(boolean v) {
             visible = v;
             if (v) {
-                motion = motionAllowed();
+                refreshMotion();
                 lastDrawNanos = 0;
                 feed.start();
                 requestFrame();
@@ -268,8 +268,14 @@ public final class RecordWallpaper extends WallpaperService {
         }
 
         private void motionChanged() {
-            motion = motionAllowed();
+            refreshMotion();
             requestFrame();
+        }
+
+        private void refreshMotion() {
+            boolean allowed = motionAllowed();
+            if (allowed != motion) Log.i("WallOfTracks", "motion " + (allowed ? "on" : "off"));
+            motion = allowed;
         }
 
         private boolean motionAllowed() {  // honour "remove animations" and battery saver
@@ -297,6 +303,9 @@ public final class RecordWallpaper extends WallpaperService {
             long up = SystemClock.uptimeMillis(), wall = System.currentTimeMillis();
 
             boolean playing = record.isPlaying(wall);
+            // still while a song plays: frames are seconds apart, so re-check here too, in case battery saver
+            // went off without telling us (charging can end it that way)
+            if (playing && !motion) refreshMotion();
             float full = RPM * 6, target = playing && motion ? full : 0;
             speed += (target - speed) * (float) (1 - Math.exp(-dt / (playing ? 0.9 : 2.2)));
             if (target == 0 && speed < 0.01f) speed = 0;
