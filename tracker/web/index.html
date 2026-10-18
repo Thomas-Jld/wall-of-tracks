@@ -72,6 +72,7 @@ const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
 
 // nowAt is when *this browser* received the player state, so a skewed clock doesn't matter
 let dayPlays = [], nowPlaying = null, nowAt = 0, dayLoaded = false;
+let drawnAt = 0, totalSec = 0;  // when the record was last drawn, and the listening it showed
 
 // ---------- data: read once on load, then pushed live, with plain polling as a fallback ----------
 function setDay(d) {
@@ -80,7 +81,15 @@ function setDay(d) {
   dayPlays.forEach(p => image(p.img));  // start downloading covers now, not only once something is drawn
   redraw();
 }
-function setNow(n) { nowPlaying = n; nowAt = Date.now(); image(n.track?.album_image); redraw(); }
+// The player is reported every few seconds while playing; only a new album or cover, or play/pause
+// (including the reports going stale), changes the record. The rest just keeps the playing slice's timing current.
+function setNow(n) {
+  const before = nowPlaying, wasPlaying = isPlaying();
+  nowPlaying = n; nowAt = Date.now();
+  image(n.track?.album_image);
+  if (!before || isPlaying() !== wasPlaying || before.track?.album !== n.track?.album
+      || before.track?.album_image !== n.track?.album_image) redraw();
+}
 
 async function poll() {
   try {
@@ -291,6 +300,8 @@ function drawDisc() {
   let slices = albumSlices(plays);
   if (ORDER === "color") slices = slices.filter(s => colorFor(s.img));
   const rs = dayLoaded ? easedSlices(slices) : [];
+  drawnAt = Date.now();
+  totalSec = slices.reduce((a, s) => a + s.sec, 0);
   let acc = 0;
   for (const run of rs) {
     const a0 = -Math.PI / 2 + 2 * Math.PI * acc, a1 = a0 + 2 * Math.PI * run.share;
@@ -451,6 +462,14 @@ fit();
 applyStyle();
 poll();      // the first picture shouldn't wait for the live stream
 connect();
-setInterval(() => { if (isPlaying()) redraw(); }, 2000);  // the live slice keeps growing
+// The playing album's slice keeps growing: redraw once it has grown by about a quarter of a degree, which
+// takes the window's total listening / 1440 (10 h of listening: every 25 s; 1 h: every 2.5 s). Checking
+// every second also notices the player reports going stale, which stops the spin.
+let wasPlaying = false;
+setInterval(() => {
+  const playing = isPlaying(), every = Math.max(2e3, Math.min(30e3, totalSec / 1440 * 1e3));
+  if (playing !== wasPlaying || (playing && Date.now() - drawnAt > every)) redraw();
+  wasPlaying = playing;
+}, 1000);
 requestAnimationFrame(frame);
 </script>
