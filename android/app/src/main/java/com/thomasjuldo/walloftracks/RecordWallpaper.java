@@ -220,7 +220,15 @@ public final class RecordWallpaper extends WallpaperService {
 
         // ---------- data (arrives on background threads) ----------
         @Override public void onDay(List<Record.Play> plays) { main.post(() -> { record.setDay(plays); invalidateDisc(); }); }
-        @Override public void onNow(Record.NowPlaying now) { main.post(() -> { record.setNow(now); invalidateDisc(); }); }
+        // The player is reported every few seconds while playing; only a new album or cover, or play/pause,
+        // changes the record. The rest just keeps the playing slice's timing current.
+        @Override public void onNow(Record.NowPlaying now) {
+            main.post(() -> {
+                boolean changed = record.changesRecord(now);
+                record.setNow(now);
+                if (changed) invalidateDisc(); else requestFrame();
+            });
+        }
 
         private void invalidateDisc() {
             discDirty = true;
@@ -271,8 +279,11 @@ public final class RecordWallpaper extends WallpaperService {
             angle = (angle + speed * dt) % 360;
             flowTime += dt * speed / full;
 
-            // the playing album's slice keeps growing; slices that are easing are rebuilt at ~15 fps
-            if (playing && wall - renderedAt > 2000) discDirty = true;
+            // The playing album's slice keeps growing: rebuild once it has grown by about a quarter of a degree,
+            // which takes the window's total listening / 1440 (10 h of listening: every 25 s; 1 h: every 2.5 s).
+            // Slices that are easing are rebuilt at ~15 fps.
+            long every = (long) Math.max(2000, Math.min(30_000, record.totalSec / 1440 * 1000));
+            if (playing && wall - renderedAt > every) discDirty = true;
             if (discDirty || (record.easing && up - renderedUptime > 66)) requestRender();
             updateBackdrop(wall);
             if (fade < 1) fade = Math.min(1, fade + dt / 2.5f);

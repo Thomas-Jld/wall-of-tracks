@@ -104,6 +104,15 @@ final class Record {
 
     void setDay(List<Play> plays) { day = plays; dayLoaded = true; }
     void setNow(NowPlaying n) { now = n; }
+
+    /** Whether this player report would change the record: a new album or cover, or play/pause. */
+    boolean changesRecord(NowPlaying n) {
+        NowPlaying p = now;
+        return p == null || p.playing != n.playing || !java.util.Objects.equals(p.album, n.album)
+                || !java.util.Objects.equals(p.img, n.img);
+    }
+
+    volatile double totalSec;  // listening in the window at the last render, for pacing the rebuilds
     List<Play> dayPlays() { return day; }
 
     boolean isPlaying(long t) { return isPlaying(now, t); }
@@ -227,6 +236,9 @@ final class Record {
         // an album joins once its cover (and so its colour) is known
         List<Play> plays = composed(t);
         List<Slice> albums = albumSlices(plays);
+        double sum = 0;
+        for (Slice s : albums) sum += s.sec;
+        totalSec = sum;
         covers.reserve(albums.size() + shown.size() + 2);  // today's covers, those still fading out, and the label's
         List<Slice> placed = new ArrayList<>();
         for (Slice s : albums) if (colorOf(s.img, covers) != null) placed.add(s);
